@@ -37,6 +37,9 @@ features = ["extension-module", "multiple-pymethods", "abi3"]
 optional = true
 version = "0.20"
 
+[build-dependencies]
+pyo3-build-config = "*"
+
 [dev-dependencies]
 tracing-subscriber = {version = "0.3.18", features = ["env-filter"]}
 
