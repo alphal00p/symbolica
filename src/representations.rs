@@ -935,6 +935,7 @@ pub struct AtomBuilder<'a, A: DerefMut<Target = Atom<P>>, P: AtomSet = Linear> {
     out: A,
 }
 
+
 impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> AtomBuilder<'a, A, P> {
     /// Create a new `AtomBuilder`.
     pub fn new<'c, T: AsAtomView<'c, P>>(
@@ -986,7 +987,10 @@ impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> AtomBuilder<'a, A, P> {
             out: h,
         }
     }
+
+    
 }
+
 
 impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> From<&AtomBuilder<'a, A, P>>
     for AtomBuilder<'a, BufferHandle<'a, Atom<P>>, P>
@@ -1002,17 +1006,7 @@ impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> From<&AtomBuilder<'a, A, P>>
     }
 }
 
-impl<'a, P: AtomSet> Clone for AtomBuilder<'a, BufferHandle<'a, Atom<P>>, P> {
-    fn clone(&self) -> Self {
-        let mut h = self.workspace.new_atom();
-        h.set_from_view(&self.as_atom_view());
-        AtomBuilder {
-            state: self.state,
-            workspace: self.workspace,
-            out: h,
-        }
-    }
-}
+
 
 impl<'a, 'b, 'c, P: AtomSet, T: AsAtomView<'c, P>, A: DerefMut<Target = Atom<P>>> std::ops::Add<T>
     for AtomBuilder<'a, A, P>
