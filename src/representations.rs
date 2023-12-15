@@ -1020,6 +1020,32 @@ impl<'a, P: AtomSet> Clone for AtomBuilder<'a, BufferHandle<'a, Atom<P>>, P> {
     }
 }
 
+impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> From<&AtomBuilder<'a, A, P>>
+    for AtomBuilder<'a, BufferHandle<'a, Atom<P>>, P>
+{
+    fn from(value: &AtomBuilder<'a, A, P>) -> Self {
+        let mut h = value.workspace.new_atom();
+        h.set_from_view(&value.as_atom_view());
+        AtomBuilder {
+            state: value.state,
+            workspace: value.workspace,
+            out: h,
+        }
+    }
+}
+
+impl<'a, P: AtomSet> Clone for AtomBuilder<'a, BufferHandle<'a, Atom<P>>, P> {
+    fn clone(&self) -> Self {
+        let mut h = self.workspace.new_atom();
+        h.set_from_view(&self.as_atom_view());
+        AtomBuilder {
+            state: self.state,
+            workspace: self.workspace,
+            out: h,
+        }
+    }
+}
+
 impl<'a, 'b, 'c, P: AtomSet, T: AsAtomView<'c, P>, A: DerefMut<Target = Atom<P>>> std::ops::Add<T>
     for AtomBuilder<'a, A, P>
 {
