@@ -298,7 +298,6 @@ pub trait AsAtomView<'a, P: AtomSet>: Sized {
 
     /// Create a builder of an atom. Can be used for easy
     /// construction of terms.
-
     fn builder<'b>(
         self,
         state: &'b State,
@@ -1006,12 +1005,18 @@ impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> From<&AtomBuilder<'a, A, P>>
     }
 }
 
-pub type Expr<'a> = AtomBuilder<'a, BufferHandle<'a, Atom>>;
 
 
-impl<'a> Clone for Expr<'a> {
+
+impl<'a, P: AtomSet> Clone for AtomBuilder<'a, BufferHandle<'a, Atom<P>>, P> {
     fn clone(&self) -> Self {
-        self.into()
+        let mut h = self.workspace.new_atom();
+        h.set_from_view(&self.as_atom_view());
+        AtomBuilder {
+            state: self.state,
+            workspace: self.workspace,
+            out: h,
+        }
     }
 }
 
