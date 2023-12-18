@@ -1,6 +1,6 @@
 use symbolica::{
-    representations::{AsAtomView, Atom, FunctionBuilder, },
-    state::{FunctionAttribute, State, Workspace},
+    representations::{AsAtomView, Atom, FunctionBuilder, number::Number, },
+    state::{FunctionAttribute, State, Workspace}, rings::rational::Rational,
 };
 
 // fn zeros<'a>(ws:&'a Workspace,state:&'a State) -> Vec<Expr<'a>>{
