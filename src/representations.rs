@@ -9,7 +9,7 @@ use crate::{
 use std::{
     cmp::Ordering,
     hash::Hash,
-    ops::{DerefMut, Range},
+    ops::{DerefMut, Range}, fmt::Debug,
 };
 
 use self::{
@@ -929,11 +929,21 @@ impl<'a, P: AtomSet> FunctionBuilder<'a, P> {
 /// println!("{}", xb.as_atom_view().printer(&state));
 /// # }
 /// ```
+///
 pub struct AtomBuilder<'a, A: DerefMut<Target = Atom<P>>, P: AtomSet = Linear> {
     pub state: &'a State,
     pub workspace: &'a Workspace<P>,
     out: A,
 }
+
+
+impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> Debug for AtomBuilder<'a,A,P>{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.out.as_atom_view().printer(self.state))
+    }
+}
+
+
 
 impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> AtomBuilder<'a, A, P> {
     /// Create a new `AtomBuilder`.
