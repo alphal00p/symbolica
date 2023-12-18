@@ -1097,7 +1097,7 @@ impl<'a, 'b, P: AtomSet, A: DerefMut<Target = Atom<P>>> std::ops::Neg for AtomBu
     }
 }
 
-
+type Expr<'a> = AtomBuilder<'a, BufferHandle<'a, Atom>>;
 
 
 impl<'a,'b> std::ops::AddAssign<&'b Expr<'a>> for Expr<'a> {
