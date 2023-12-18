@@ -992,6 +992,7 @@ impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> AtomBuilder<'a, A, P> {
     
 }
 
+
 impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> From<&AtomBuilder<'a, A, P>>
     for AtomBuilder<'a, BufferHandle<'a, Atom<P>>, P>
 {
@@ -1008,22 +1009,6 @@ impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> From<&AtomBuilder<'a, A, P>>
 
 
 
-impl<'a, P: AtomSet> Clone for AtomBuilder<'a, BufferHandle<'a, Atom<P>>, P> {
-    fn clone(&self) -> Self {
-        let mut h = self.workspace.new_atom();
-        h.set_from_view(&self.as_atom_view());
-        AtomBuilder {
-            state: self.state,
-            workspace: self.workspace,
-            out: h,
-        }
-    }
-
-    
-}
-
-
-
 impl<'a, 'b, 'c, P: AtomSet, T: AsAtomView<'c, P>, A: DerefMut<Target = Atom<P>>> std::ops::Add<T>
     for AtomBuilder<'a, A, P>
 {
@@ -1033,21 +1018,6 @@ impl<'a, 'b, 'c, P: AtomSet, T: AsAtomView<'c, P>, A: DerefMut<Target = Atom<P>>
         self.out
             .as_view()
             .add_no_norm(self.workspace, rhs.as_atom_view())
-            .as_view()
-            .normalize(self.workspace, self.state, &mut self.out);
-        self
-    }
-}
-
-impl<'a, 'b, 'c, P: AtomSet, T: AsAtomView<'c, P>, A: DerefMut<Target = Atom<P>>> std::ops::Sub<T>
-    for AtomBuilder<'a, A, P>
-{
-    type Output = AtomBuilder<'a, A, P>;
-
-    fn sub(mut self, rhs: T) -> Self::Output {
-        self.out
-            .as_view()
-            .sub_no_norm(self.workspace, rhs.as_atom_view())
             .as_view()
             .normalize(self.workspace, self.state, &mut self.out);
         self

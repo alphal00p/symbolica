@@ -1,14 +1,7 @@
 use symbolica::{
-    representations::{AsAtomView, Atom, FunctionBuilder, number::Number, },
-    state::{FunctionAttribute, State, Workspace}, rings::rational::Rational,
+    representations::{AsAtomView, Atom, FunctionBuilder,  },
+    state::{FunctionAttribute, State, Workspace}, rings::{rational::Rational, },
 };
-
-// fn zeros<'a>(ws:&'a Workspace,state:&'a State) -> Vec<Expr<'a>>{
-
-//     let zeroatom = ws.new_num(0).to_owned();
-//     let zero = zeroatom.builder(&state, ws).to_owned();
-//     vec![zero;3]
-// } 
 
 // fn zeros<'a>(ws:&'a Workspace,state:&'a State) -> Vec<Expr<'a>>{
 

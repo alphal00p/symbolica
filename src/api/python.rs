@@ -1354,7 +1354,26 @@ impl PythonExpression {
                     num_exp_as_superscript,
                     latex
                 },
-                &STATE.read().unwrap(),
+                &&get_state!()?,
+            )
+        ))
+    }
+
+    /// Convert the expression into a LaTeX string.
+    ///
+    /// Examples
+    /// --------
+    /// >>> a = Expression.parse('128378127123 z^(2/3)*w^2/x/y + y^4 + z^34 + x^(x+2)+3/5+f(x,x^2)')
+    /// >>> print(a.to_latex())
+    ///
+    /// Yields `$$z^{34}+x^{x+2}+y^{4}+f(x,x^{2})+128378127123 z^{\\frac{2}{3}} w^{2} \\frac{1}{x} \\frac{1}{y}+\\frac{3}{5}$$`.
+    pub fn to_latex(&self) -> PyResult<String> {
+        Ok(format!(
+            "$${}$$",
+            AtomPrinter::new_with_options(
+                self.expr.as_view(),
+                PrintOptions::latex(),
+                &&get_state!()?,
             )
         ))
     }
