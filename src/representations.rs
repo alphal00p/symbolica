@@ -8,8 +8,9 @@ use crate::{
 };
 use std::{
     cmp::Ordering,
+    fmt::Debug,
     hash::Hash,
-    ops::{DerefMut, Range}, fmt::Debug,
+    ops::{DerefMut, Range},
 };
 
 use self::{
@@ -936,14 +937,11 @@ pub struct AtomBuilder<'a, A: DerefMut<Target = Atom<P>>, P: AtomSet = Linear> {
     out: A,
 }
 
-
-impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> Debug for AtomBuilder<'a,A,P>{
+impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> Debug for AtomBuilder<'a, A, P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.out.as_atom_view().printer(self.state))
     }
 }
-
-
 
 impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> AtomBuilder<'a, A, P> {
     /// Create a new `AtomBuilder`.
@@ -959,6 +957,10 @@ impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> AtomBuilder<'a, A, P> {
             workspace,
             out,
         }
+    }
+
+    pub fn finish(self) -> A {
+        self.out
     }
 
     /// Yield the mutable reference to the output atom.
@@ -983,6 +985,12 @@ impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> AtomBuilder<'a, A, P> {
             .as_view()
             .normalize(self.workspace, self.state, &mut self.out);
         self
+    }
+}
+
+impl AtomBuilder<'_, BufferHandle<'_, Atom>> {
+    pub fn into_atom(self) -> Atom {
+        Atom::new_from_view(&self.finish().as_atom_view())
     }
 }
 
