@@ -1080,7 +1080,7 @@ impl<'a, 'b, P: AtomSet, T: AsAtomView<'b, P>, A: DerefMut<Target = Atom<P>>> st
     }
 }
 
-impl<'a, 'b, P: AtomSet, A: DerefMut<Target = Atom<P>>> std::ops::Neg for AtomBuilder<'a, A, P> {
+impl<'a, P: AtomSet, A: DerefMut<Target = Atom<P>>> std::ops::Neg for AtomBuilder<'a, A, P> {
     type Output = AtomBuilder<'a, A, P>;
 
     fn neg(mut self) -> Self::Output {
