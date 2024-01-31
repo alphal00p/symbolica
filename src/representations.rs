@@ -633,6 +633,7 @@ impl<P: AtomSet> Atom<P> {
 
     /// Convert the owned atom to a `OwnedAtom::Num(n)`, returning a reference to `n`.
     /// This destroys any previous content of the owned atom, but reuses the memory.
+    #[inline]
     pub fn to_num(&mut self) -> &mut P::ON {
         let mut ov = std::mem::replace(self, Atom::Empty);
 
@@ -657,6 +658,7 @@ impl<P: AtomSet> Atom<P> {
 
     /// Convert the owned atom to a `OwnedAtom::Pow(p)`, returning a reference to `p`.
     /// This destroys any previous content of the owned atom, but reuses the memory.
+    #[inline]
     pub fn to_pow(&mut self) -> &mut P::OP {
         let mut ov = std::mem::replace(self, Atom::Empty);
 
@@ -681,6 +683,7 @@ impl<P: AtomSet> Atom<P> {
 
     /// Convert the owned atom to a `OwnedAtom::Var(v)`, returning a reference to `v`.
     /// This destroys any previous content of the owned atom, but reuses the memory.
+    #[inline]
     pub fn to_var(&mut self) -> &mut P::OV {
         let mut ov = std::mem::replace(self, Atom::Empty);
 
@@ -705,6 +708,7 @@ impl<P: AtomSet> Atom<P> {
 
     /// Convert the owned atom to a `OwnedAtom::Fun(f)`, returning a reference to `f`.
     /// This destroys any previous content of the owned atom, but reuses the memory.
+    #[inline]
     pub fn to_fun(&mut self) -> &mut P::OF {
         let mut of = std::mem::replace(self, Atom::Empty);
 
@@ -729,6 +733,7 @@ impl<P: AtomSet> Atom<P> {
 
     /// Convert the owned atom to a `OwnedAtom::Mul(m)`, returning a reference to `m`.
     /// This destroys any previous content of the owned atom, but reuses the memory.
+    #[inline]
     pub fn to_mul(&mut self) -> &mut P::OM {
         let mut om = std::mem::replace(self, Atom::Empty);
 
@@ -753,6 +758,7 @@ impl<P: AtomSet> Atom<P> {
 
     /// Convert the owned atom to a `OwnedAtom::Add(a)`, returning a reference to `a`.
     /// This destroys any previous content of the owned atom, but reuses the memory.
+    #[inline]
     pub fn to_add(&mut self) -> &mut P::OA {
         let mut oa = std::mem::replace(self, Atom::Empty);
 
@@ -782,6 +788,7 @@ impl<P: AtomSet> Atom<P> {
         owned
     }
 
+    #[inline(always)]
     pub fn set_from_view(&mut self, view: &AtomView<P>) {
         match view {
             AtomView::Num(n) => {
@@ -811,6 +818,7 @@ impl<P: AtomSet> Atom<P> {
         }
     }
 
+    #[inline(always)]
     pub fn as_view(&self) -> AtomView<'_, P> {
         match self {
             Atom::Num(n) => AtomView::Num(n.to_num_view()),
@@ -829,6 +837,7 @@ impl<P: AtomSet> ResettableBuffer for Atom<P> {
         Self::Num(P::ON::new())
     }
 
+    #[inline(always)]
     fn reset(&mut self) {
         match self {
             Atom::Num(n) => n.reset(),
