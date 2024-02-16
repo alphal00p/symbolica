@@ -1,6 +1,6 @@
-use rand::Rng;
-
 use crate::rings::float::{NumericalFloatComparison, Real};
+use rand::Rng;
+use serde::{Deserialize, Serialize};
 
 /// Keep track of statistical quantities, such as the average,
 /// the error and the chi-squared of samples added over multiple
@@ -17,7 +17,7 @@ use crate::rings::float::{NumericalFloatComparison, Real};
 ///
 /// The accumulator also stores which samples yielded the highest weight thus far.
 /// This can be used to study the input that impacted the average and error the most.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct StatisticsAccumulator<T: Real + NumericalFloatComparison> {
     sum: T,
     sum_sq: T,
@@ -301,7 +301,7 @@ impl<T: Real + NumericalFloatComparison> StatisticsAccumulator<T> {
 /// and contains the weight and the list of sample points.
 /// If the sample comes from a [DiscreteGrid], it is the variant [Discrete](Sample::Discrete) and contains
 /// the weight, the bin and the subsample if the bin has a nested grid.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Sample<T: Real + NumericalFloatComparison> {
     Continuous(T, Vec<T>),
     Discrete(T, usize, Option<Box<Sample<T>>>),
@@ -348,7 +348,7 @@ impl<T: Real + NumericalFloatComparison> Sample<T> {
 /// An adapting grid that captures the enhancements of an integrand.
 /// It supports discrete and continuous dimensions. The discrete dimensions
 /// can have a nested grid.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Grid<T: Real + NumericalFloatComparison> {
     Continuous(ContinuousGrid<T>),
     Discrete(DiscreteGrid<T>),
@@ -420,7 +420,7 @@ impl<T: Real + NumericalFloatComparison> Grid<T> {
 }
 
 /// A bin of a discrete grid, which may contain a subgrid.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bin<T: Real + NumericalFloatComparison> {
     pub pdf: T,
     pub accumulator: StatisticsAccumulator<T>,
@@ -459,7 +459,7 @@ impl<T: Real + NumericalFloatComparison> Bin<T> {
 /// of a sample from the grid landing in a bin is proportional to its
 /// average value if training happens on the average, or to its
 /// variance (recommended).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscreteGrid<T: Real + NumericalFloatComparison> {
     pub bins: Vec<Bin<T>>,
     pub accumulator: StatisticsAccumulator<T>,
@@ -675,7 +675,7 @@ impl<T: Real + NumericalFloatComparison> DiscreteGrid<T> {
 /// of a sample from the grid landing in a bin is proportional to its
 /// average value if training happens on the average, or to its
 /// variance (recommended).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContinuousGrid<T: Real + NumericalFloatComparison> {
     pub continuous_dimensions: Vec<ContinuousDimension<T>>,
     pub accumulator: StatisticsAccumulator<T>,
@@ -802,7 +802,7 @@ impl<T: Real + NumericalFloatComparison> ContinuousGrid<T> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContinuousDimension<T: Real + NumericalFloatComparison> {
     pub partitioning: Vec<T>,
     pub new_partitioning: Vec<T>,
