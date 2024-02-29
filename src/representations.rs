@@ -25,7 +25,7 @@ use self::default::Linear;
 pub struct Identifier(u32);
 
 impl Identifier {
-    pub(crate) const fn init(value: u32) -> Self {
+    pub const fn init(value: u32) -> Self {
         Identifier(value)
     }
 }
