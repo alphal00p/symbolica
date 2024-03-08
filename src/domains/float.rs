@@ -5,6 +5,7 @@ use std::{
 };
 
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use wide::{f64x2, f64x4};
 
 use super::rational::Rational;
@@ -488,10 +489,28 @@ impl NumericalFloatComparison for Rational {
     }
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq,Serialize,Deserialize)]
 pub struct Complex<T: Real> {
     pub re: T,
     pub im: T,
+}
+
+impl<T> Default for Complex<T> where T:Default+Real{
+    fn default() -> Self {
+        Complex{
+            re: T::default(),
+            im: T::default(),
+        }
+    }
+}
+
+impl<T> From<T> for Complex<T> where T: Real+Default{
+    fn from(value: T) -> Self {
+        Complex{
+            re: value,
+            im: T::default(),
+        }
+    }
 }
 
 impl<T: Real> Complex<T> {
@@ -539,6 +558,15 @@ impl<T: Real> Add<&Complex<T>> for Complex<T> {
     }
 }
 
+impl<'a,T: Real> Add<&Complex<T>> for &'a Complex<T> {
+    type Output = Complex<T>;
+
+    #[inline]
+    fn add(self, rhs: &Complex<T>) -> Self::Output {
+        Complex::new(self.re + rhs.re, self.im + rhs.im)
+    }
+}
+
 impl<T: Real> AddAssign for Complex<T> {
     #[inline]
     fn add_assign(&mut self, rhs: Self) {
@@ -572,6 +600,15 @@ impl<T: Real> Sub<&Complex<T>> for Complex<T> {
     }
 }
 
+impl<'a,T: Real> Sub<&Complex<T>> for &'a Complex<T> {
+    type Output = Complex<T>;
+
+    #[inline]
+    fn sub(self, rhs: &Complex<T>) -> Self::Output {
+        Complex::new(self.re - rhs.re, self.im - rhs.im)
+    }
+}
+
 impl<T: Real> SubAssign for Complex<T> {
     #[inline]
     fn sub_assign(&mut self, rhs: Self) {
@@ -601,6 +638,18 @@ impl<T: Real> Mul<&Complex<T>> for Complex<T> {
 
     #[inline]
     fn mul(self, rhs: &Self) -> Self::Output {
+        Complex::new(
+            self.re * rhs.re - self.im * rhs.im,
+            self.re * rhs.im + self.im * rhs.re,
+        )
+    }
+}
+
+impl<'a,T: Real> Mul<&Complex<T>> for &'a Complex<T> {
+    type Output = Complex<T>;
+
+    #[inline]
+    fn mul(self, rhs: &Complex<T>) -> Self::Output {
         Complex::new(
             self.re * rhs.re - self.im * rhs.im,
             self.re * rhs.im + self.im * rhs.re,
