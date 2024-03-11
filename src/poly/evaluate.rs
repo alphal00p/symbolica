@@ -8,7 +8,7 @@ use rand::{thread_rng, Rng};
 
 use crate::{
     domains::Ring,
-    representations::{Atom, AtomView, Fun},
+    representations::{Atom, AtomView},
     state::State,
 };
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
         rational::{Rational, RationalField},
         EuclideanDomain,
     },
-    representations::Identifier,
+    representations::Symbol,
 };
 
 use super::{polynomial::MultivariatePolynomial, Exponent};
@@ -858,15 +858,10 @@ pub enum Variable<N: NumericalFloatLike> {
 }
 
 impl Variable<Rational> {
-    fn to_pretty_string(
-        &self,
-        var_map: &[super::Variable],
-        state: &State,
-        mode: InstructionSetMode,
-    ) -> String {
+    fn to_pretty_string(&self, var_map: &[super::Variable], mode: InstructionSetMode) -> String {
         match self {
             Variable::Var(v, index) => {
-                let mut s = var_map[*v].to_string(state);
+                let mut s = var_map[*v].to_string();
 
                 if let Some(index) = index {
                     s.push_str(&format!("[{}]", index));
@@ -1522,7 +1517,6 @@ pub enum InstructionSetMode {
 
 pub struct InstructionSetPrinter<'a> {
     pub instr: &'a InstructionListOutput<Rational>,
-    pub state: &'a State,
     pub mode: InstructionSetMode,
     pub name: String, // function name
 }
@@ -1563,21 +1557,18 @@ impl<'a> std::fmt::Display for InstructionSetPrinter<'a> {
                         if !seen_arrays.contains(x) {
                             seen_arrays.push(*x);
 
-                            Some(format!(
-                                "T* {}",
-                                super::Variable::Identifier(*x).to_string(self.state)
-                            ))
+                            Some(format!("T* {}", super::Variable::Symbol(*x).to_string()))
                         } else {
                             None
                         }
-                    } else if let super::Variable::Identifier(i) = x {
+                    } else if let super::Variable::Symbol(i) = x {
                         if [State::E, State::I, State::PI].contains(i) {
                             None
                         } else {
-                            Some(format!("T {}", x.to_string(self.state)))
+                            Some(format!("T {}", x.to_string()))
                         }
                     } else {
-                        Some(format!("T {}", x.to_string(self.state)))
+                        Some(format!("T {}", x.to_string()))
                     })
                     .collect::<Vec<_>>()
                     .join(","),
@@ -1633,7 +1624,7 @@ impl<'a> std::fmt::Display for InstructionSetPrinter<'a> {
                 Instruction::Init(x) => f.write_fmt(format_args!(
                     "\tZ{} = {};\n",
                     reg,
-                    x.to_pretty_string(&self.instr.input_map, self.state, self.mode)
+                    x.to_pretty_string(&self.instr.input_map, self.mode)
                 ))?,
             }
         }
@@ -1670,7 +1661,7 @@ impl<'a> std::fmt::Display for InstructionSetPrinter<'a> {
 }
 
 /// A computational graph with efficient output evaluation for a nesting of variable identifications (`x_n = x_{n-1} + 2*x_{n-2}`, etc).
-pub struct ExpressionEvaluator<'a> {
+pub struct ExpressionEvaluator {
     operations: Vec<(
         super::Variable,
         usize,
@@ -1678,10 +1669,9 @@ pub struct ExpressionEvaluator<'a> {
         Vec<super::Variable>,
     )>,
     input: Vec<super::Variable>,
-    state: &'a State,
 }
 
-impl<'a> ExpressionEvaluator<'a> {
+impl ExpressionEvaluator {
     /// Create a computational graph with efficient output evaluation for a nesting of variable identifications (`x_n = x_{n-1} + 2*x_{n-2}`, etc).
     /// Every level provides a list of independent vectors whose expressions only depend on variables defined in previous levels.
     /// In these expressions, the references to previous vectors are represented using functions with the vector's name whose single argument is an index into the output array of the evaluation of that vector.
@@ -1703,11 +1693,7 @@ impl<'a> ExpressionEvaluator<'a> {
     /// Each expression will be converted to a polynomial and optimized by writing it in a near-optimal Horner scheme and by performing
     /// common subexpression elimination. The number of optimization iterations can be set using `n_iter`.
     ///
-    pub fn new(
-        levels: Vec<Vec<(Identifier, Vec<Atom>)>>,
-        state: &State,
-        n_iter: usize,
-    ) -> ExpressionEvaluator {
+    pub fn new(levels: Vec<Vec<(Symbol, Vec<Atom>)>>, n_iter: usize) -> ExpressionEvaluator {
         let mut overall_ops = vec![]; // the main function that calls all levels
 
         for l in levels {
@@ -1731,7 +1717,7 @@ impl<'a> ExpressionEvaluator<'a> {
 
                 let var_map = first.var_map.clone().unwrap();
 
-                let poly_ref = polys.iter().map(|x| x).collect::<Vec<_>>();
+                let poly_ref = polys.iter().collect::<Vec<_>>();
 
                 let (h, _score, _scheme) = HornerScheme::optimize_multiple(&poly_ref, n_iter);
 
@@ -1752,7 +1738,7 @@ impl<'a> ExpressionEvaluator<'a> {
                     .iter()
                     .filter_map(|(a, r)| {
                         if let AtomView::Fun(f) = a {
-                            Some((r.clone(), state.get_name(f.get_name()).to_string()))
+                            Some((r.clone(), State::get_name(f.get_symbol()).to_string()))
                         } else {
                             None
                         }
@@ -1774,11 +1760,11 @@ impl<'a> ExpressionEvaluator<'a> {
                             if !seen_arrays.contains(x) {
                                 seen_arrays.push(*x);
 
-                                Some(super::Variable::Identifier(*x))
+                                Some(super::Variable::Symbol(*x))
                             } else {
                                 None
                             }
-                        } else if let super::Variable::Identifier(i) = x {
+                        } else if let super::Variable::Symbol(i) = x {
                             if [State::E, State::I, State::PI].contains(i) {
                                 None
                             } else {
@@ -1790,7 +1776,7 @@ impl<'a> ExpressionEvaluator<'a> {
                     })
                     .collect::<Vec<_>>();
 
-                overall_ops.push((super::Variable::Identifier(id), h.len(), o, call_args));
+                overall_ops.push((super::Variable::Symbol(id), h.len(), o, call_args));
             }
         }
 
@@ -1804,12 +1790,11 @@ impl<'a> ExpressionEvaluator<'a> {
             }
         }
         let mut input = external.into_iter().cloned().collect::<Vec<_>>();
-        input.sort_by_cached_key(|f| f.to_string(state));
+        input.sort_by_cached_key(|f| f.to_string());
 
         ExpressionEvaluator {
             operations: overall_ops,
             input,
-            state,
         }
     }
 
@@ -1819,7 +1804,7 @@ impl<'a> ExpressionEvaluator<'a> {
     }
 }
 
-impl<'a> std::fmt::Display for ExpressionEvaluator<'a> {
+impl std::fmt::Display for ExpressionEvaluator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
             "#include <cmath>
@@ -1835,9 +1820,8 @@ auto 𝑖 = 1i;\n",
             f.write_fmt(format_args!(
                 "{}\n",
                 InstructionSetPrinter {
-                    instr: &o,
-                    state: &self.state,
-                    name: id.to_string(self.state),
+                    instr: o,
+                    name: id.to_string(),
                     mode: InstructionSetMode::CPP(InstructionSetModeCPPSettings {
                         write_header_and_test: false,
                         always_pass_output_array: true,
@@ -1853,14 +1837,14 @@ auto 𝑖 = 1i;\n",
             "void evaluate({}, T* {}_res) {{\n",
             self.input
                 .iter()
-                .map(|x| format!("T* {}", x.to_string(self.state)))
+                .map(|x| format!("T* {}", x.to_string()))
                 .collect::<Vec<_>>()
                 .join(", "),
-            last.to_string(self.state)
+            last.to_string()
         ))?;
 
         for (id, out_len, _, args) in &self.operations {
-            let name = id.to_string(self.state);
+            let name = id.to_string();
 
             if *id != last {
                 f.write_fmt(format_args!("\tT {}_res[{}];\n", name, out_len))?;
@@ -1870,9 +1854,9 @@ auto 𝑖 = 1i;\n",
                 .iter()
                 .map(|x| {
                     if self.operations.iter().any(|(name, _, _, _)| x == name) {
-                        x.to_string(self.state) + "_res"
+                        x.to_string() + "_res"
                     } else {
-                        x.to_string(self.state)
+                        x.to_string()
                     }
                 })
                 .collect();

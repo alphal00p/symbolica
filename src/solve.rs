@@ -10,20 +10,19 @@ use crate::{
         rational_polynomial::{RationalPolynomial, RationalPolynomialField},
     },
     poly::{Exponent, Variable},
-    representations::{Atom, AtomSet, AtomView, Identifier},
-    state::{ResettableBuffer, State, Workspace},
+    representations::{Atom, AtomView, Symbol},
+    state::Workspace,
 };
 
-impl<'a, P: AtomSet> AtomView<'a, P> {
+impl<'a> AtomView<'a> {
     /// Solve a system that is linear in `vars`, if possible.
     /// Each expression in `system` is understood to yield 0.
     pub fn solve_linear_system<E: Exponent>(
-        system: &[AtomView<P>],
-        vars: &[Identifier],
-        workspace: &Workspace<P>,
-        state: &State,
-    ) -> Result<Vec<Atom<P>>, String> {
-        let vars: Vec<_> = vars.iter().map(|v| Variable::Identifier(*v)).collect();
+        system: &[AtomView],
+        vars: &[Symbol],
+        workspace: &Workspace,
+    ) -> Result<Vec<Atom>, String> {
+        let vars: Vec<_> = vars.iter().map(|v| Variable::Symbol(*v)).collect();
         let mut map = HashMap::default();
 
         let mut mat = Vec::with_capacity(system.len() * vars.len());
@@ -33,7 +32,6 @@ impl<'a, P: AtomSet> AtomView<'a, P> {
         for (si, a) in system.iter().enumerate() {
             let rat: RationalPolynomial<IntegerRing, E> = a.to_rational_polynomial_with_map(
                 workspace,
-                state,
                 &RationalField::new(),
                 &IntegerRing::new(),
                 &mut map,
@@ -92,7 +90,7 @@ impl<'a, P: AtomSet> AtomView<'a, P> {
         let b = Matrix {
             shape: (rhs.len() as u32, 1),
             data: rhs.into(),
-            field: field,
+            field,
         };
 
         let sol = match m.solve(&b) {
@@ -105,9 +103,9 @@ impl<'a, P: AtomSet> AtomView<'a, P> {
 
         let inv_map = map.iter().map(|(k, v)| (v.clone(), k.as_view())).collect();
         for (s, v) in sol.data.iter().zip(&vars) {
-            let mut a = Atom::new();
-            s.to_expression(workspace, state, &inv_map, &mut a);
-            let Variable::Identifier(_) = *v else {
+            let mut a = Atom::default();
+            s.to_expression(workspace, &inv_map, &mut a);
+            let Variable::Symbol(_) = *v else {
                 panic!("Temp var left");
             };
 

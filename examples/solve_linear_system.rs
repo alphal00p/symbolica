@@ -7,37 +7,31 @@ use symbolica::{
         rational::RationalField,
         rational_polynomial::{RationalPolynomial, RationalPolynomialField},
     },
-    parser::Token,
     poly::Variable,
     representations::{Atom, AtomView},
     state::{State, Workspace},
 };
 
 fn solve() {
-    let mut state = State::new();
-    let workspace: Workspace = Workspace::default();
+    let workspace: Workspace = Workspace::new();
 
-    let x = state.get_or_insert_var("x");
-    let y = state.get_or_insert_var("y");
-    let z = state.get_or_insert_var("z");
+    let x = State::get_or_insert_var("x");
+    let y = State::get_or_insert_var("y");
+    let z = State::get_or_insert_var("z");
     let eqs = ["c*x + f(c)*y + z - 1", "x + c*y + z/c - 2", "(c-1)x + c*z"];
 
-    let atoms: Vec<_> = eqs
-        .iter()
-        .map(|e| Atom::parse(e, &mut state, &workspace).unwrap())
-        .collect();
+    let atoms: Vec<_> = eqs.iter().map(|e| Atom::parse(e).unwrap()).collect();
     let system: Vec<_> = atoms.iter().map(|x| x.as_view()).collect();
 
-    let sol = AtomView::solve_linear_system::<u8>(&system, &[x, y, z], &workspace, &state).unwrap();
+    let sol = AtomView::solve_linear_system::<u8>(&system, &[x, y, z], &workspace).unwrap();
 
     for (v, s) in ["x", "y", "z"].iter().zip(&sol) {
-        println!("{} = {}", v, s.printer(&state));
+        println!("{} = {}", v, s);
     }
 }
 
 fn solve_from_matrix() {
-    let mut state = State::new();
-    let workspace: Workspace = Workspace::default();
+    let workspace: Workspace = Workspace::new();
 
     let system = [["c", "c+1", "c^2+5"], ["1", "c", "c+1"], ["c-1", "-1", "c"]];
     let rhs = ["1", "2", "-1"];
@@ -47,20 +41,17 @@ fn solve_from_matrix() {
         println!("\t ({}).x\u{20D7} = {}", r.join(","), v);
     }
 
-    let var_map = Arc::new(vec![Variable::Identifier(state.get_or_insert_var("c"))]);
+    let var_map = Arc::new(vec![Variable::Symbol(State::get_or_insert_var("c"))]);
 
     let system_rat: Vec<RationalPolynomial<IntegerRing, u8>> = system
         .iter()
         .flatten()
         .map(|s| {
-            Token::parse(s)
-                .unwrap()
-                .to_atom(&mut state, &workspace)
+            Atom::parse(s)
                 .unwrap()
                 .as_view()
                 .to_rational_polynomial(
                     &workspace,
-                    &state,
                     &RationalField::new(),
                     &IntegerRing::new(),
                     Some(&var_map),
@@ -72,14 +63,11 @@ fn solve_from_matrix() {
     let rhs_rat: Vec<RationalPolynomial<IntegerRing, u8>> = rhs
         .iter()
         .map(|s| {
-            Token::parse(s)
-                .unwrap()
-                .to_atom(&mut state, &workspace)
+            Atom::parse(s)
                 .unwrap()
                 .as_view()
                 .to_rational_polynomial(
                     &workspace,
-                    &state,
                     &RationalField::new(),
                     &IntegerRing::new(),
                     Some(&var_map),
@@ -105,7 +93,7 @@ fn solve_from_matrix() {
                 "x\u{20D7} = {{{}}}",
                 sol.data
                     .iter()
-                    .map(|r| format!("{}", r.printer(&state)))
+                    .map(|r| format!("{}", r))
                     .collect::<Vec<_>>()
                     .join(", ")
             )

@@ -1,14 +1,11 @@
 use ahash::HashMap;
 
 use crate::{
-    representations::{
-        Add, AsAtomView, Atom, AtomSet, AtomView, Fun, Identifier, Mul, OwnedAdd, OwnedMul, Pow,
-        Var,
-    },
-    state::{State, Workspace},
+    representations::{Add, Atom, AtomView, Symbol},
+    state::Workspace,
 };
 
-impl<'a, P: AtomSet> AtomView<'a, P> {
+impl Atom {
     /// Collect terms involving the same power of `x`, where `x` is a variable or function name, e.g.
     ///
     /// ```math
@@ -19,25 +16,106 @@ impl<'a, P: AtomSet> AtomView<'a, P> {
     /// `key_map` and `coeff_map` respectively.
     pub fn collect(
         &self,
-        x: Identifier,
-        workspace: &Workspace<P>,
-        state: &State,
-        key_map: Option<Box<dyn Fn(AtomView<P>, &mut Atom<P>)>>,
-        coeff_map: Option<Box<dyn Fn(AtomView<P>, &mut Atom<P>)>>,
-        out: &mut Atom<P>,
+        x: Symbol,
+        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+    ) -> Atom {
+        self.as_view().collect(x, key_map, coeff_map)
+    }
+
+    /// Collect terms involving the same power of `x`, where `x` is a variable or function name, e.g.
+    ///
+    /// ```math
+    /// collect(x + x * y + x^2, x) = x * (1+y) + x^2
+    /// ```
+    ///
+    /// Both the *key* (the quantity collected in) and its coefficient can be mapped using
+    /// `key_map` and `coeff_map` respectively.
+    pub fn collect_into(
+        &self,
+        x: Symbol,
+        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        out: &mut Atom,
     ) {
-        let (h, rest) = self.coefficient_list(x, workspace, state);
+        self.as_view().collect_into(x, key_map, coeff_map, out)
+    }
+
+    /// Collect terms involving the same power of `x`, where `x` is a variable or function name.
+    /// Return the list of key-coefficient pairs and the remainder that matched no key.
+    pub fn coefficient_list(&self, x: Symbol) -> (Vec<(AtomView<'_>, Atom)>, Atom) {
+        Workspace::get_local().with(|ws| self.as_view().coefficient_list_with_ws(x, ws))
+    }
+}
+
+impl<'a> AtomView<'a> {
+    /// Collect terms involving the same power of `x`, where `x` is a variable or function name, e.g.
+    ///
+    /// ```math
+    /// collect(x + x * y + x^2, x) = x * (1+y) + x^2
+    /// ```
+    ///
+    /// Both the *key* (the quantity collected in) and its coefficient can be mapped using
+    /// `key_map` and `coeff_map` respectively.
+    pub fn collect(
+        &self,
+        x: Symbol,
+        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+    ) -> Atom {
+        Workspace::get_local().with(|ws| {
+            let mut out = ws.new_atom();
+            self.collect_with_ws_into(x, ws, key_map, coeff_map, &mut out);
+            out.into_inner()
+        })
+    }
+
+    /// Collect terms involving the same power of `x`, where `x` is a variable or function name, e.g.
+    ///
+    /// ```math
+    /// collect(x + x * y + x^2, x) = x * (1+y) + x^2
+    /// ```
+    ///
+    /// Both the *key* (the quantity collected in) and its coefficient can be mapped using
+    /// `key_map` and `coeff_map` respectively.
+    pub fn collect_into(
+        &self,
+        x: Symbol,
+        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        out: &mut Atom,
+    ) {
+        Workspace::get_local().with(|ws| self.collect_with_ws_into(x, ws, key_map, coeff_map, out))
+    }
+
+    /// Collect terms involving the same power of `x`, where `x` is a variable or function name, e.g.
+    ///
+    /// ```math
+    /// collect(x + x * y + x^2, x) = x * (1+y) + x^2
+    /// ```
+    ///
+    /// Both the *key* (the quantity collected in) and its coefficient can be mapped using
+    /// `key_map` and `coeff_map` respectively.
+    pub fn collect_with_ws_into(
+        &self,
+        x: Symbol,
+        workspace: &Workspace,
+        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        out: &mut Atom,
+    ) {
+        let (h, rest) = self.coefficient_list_with_ws(x, workspace);
 
         let mut add_h = workspace.new_atom();
         let add = add_h.to_add();
 
-        fn map_key_coeff<P: AtomSet>(
-            key: AtomView<P>,
-            coeff: Atom<P>,
-            workspace: &Workspace<P>,
-            key_map: &Option<Box<dyn Fn(AtomView<P>, &mut Atom<P>)>>,
-            coeff_map: &Option<Box<dyn Fn(AtomView<P>, &mut Atom<P>)>>,
-            add: &mut P::OA,
+        fn map_key_coeff(
+            key: AtomView,
+            coeff: Atom,
+            workspace: &Workspace,
+            key_map: &Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+            coeff_map: &Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+            add: &mut Add,
         ) {
             let mut mul_h = workspace.new_atom();
             let mul = mul_h.to_mul();
@@ -58,8 +136,6 @@ impl<'a, P: AtomSet> AtomView<'a, P> {
                 mul.extend(coeff.as_view());
             }
 
-            mul.set_dirty(true);
-
             add.extend(mul_h.as_view());
         }
 
@@ -78,46 +154,47 @@ impl<'a, P: AtomSet> AtomView<'a, P> {
             add.extend(rest.as_view());
         }
 
-        add.set_dirty(true);
-        add_h.as_view().normalize(workspace, state, out);
+        add_h.as_view().normalize(workspace, out);
     }
 
     /// Collect terms involving the same power of `x`, where `x` is a variable or function name.
     /// Return the list of key-coefficient pairs and the remainder that matched no key.
-    pub fn coefficient_list(
+    pub fn coefficient_list(&self, x: Symbol) -> (Vec<(AtomView<'a>, Atom)>, Atom) {
+        Workspace::get_local().with(|ws| self.coefficient_list_with_ws(x, ws))
+    }
+
+    /// Collect terms involving the same power of `x`, where `x` is a variable or function name.
+    /// Return the list of key-coefficient pairs and the remainder that matched no key.
+    pub fn coefficient_list_with_ws(
         &self,
-        x: Identifier,
-        workspace: &Workspace<P>,
-        state: &State,
-    ) -> (Vec<(AtomView<'a, P>, Atom<P>)>, Atom<P>) {
+        x: Symbol,
+        workspace: &Workspace,
+    ) -> (Vec<(AtomView<'a>, Atom)>, Atom) {
         let mut h = HashMap::default();
         let mut rest = workspace.new_num(0);
 
         match self {
             AtomView::Add(a) => {
                 for arg in a.iter() {
-                    arg.collect_factor(x, workspace, state, &mut h, &mut rest)
+                    arg.collect_factor(x, workspace, &mut h, &mut rest)
                 }
             }
-            _ => self.collect_factor(x, workspace, state, &mut h, &mut rest),
+            _ => self.collect_factor(x, workspace, &mut h, &mut rest),
         }
 
-        (
-            h.into_iter().collect(),
-            Atom::new_from_view(&rest.as_view()),
-        )
+        (h.into_iter().collect(), rest.as_view().to_owned())
     }
 
     /// Check if a factor contains `x` at the ground level.
-    fn has_key(&self, x: Identifier) -> bool {
+    fn has_key(&self, x: Symbol) -> bool {
         match self {
-            AtomView::Var(v) => v.get_name() == x,
-            AtomView::Fun(f) => f.get_name() == x,
+            AtomView::Var(v) => v.get_symbol() == x,
+            AtomView::Fun(f) => f.get_symbol() == x,
             AtomView::Pow(p) => {
                 let (base, _) = p.get_base_exp();
                 match base {
-                    AtomView::Var(v) => v.get_name() == x,
-                    AtomView::Fun(f) => f.get_name() == x,
+                    AtomView::Var(v) => v.get_symbol() == x,
+                    AtomView::Fun(f) => f.get_symbol() == x,
                     _ => false,
                 }
             }
@@ -128,11 +205,11 @@ impl<'a, P: AtomSet> AtomView<'a, P> {
 
     fn collect_factor(
         &self,
-        x: Identifier,
-        workspace: &Workspace<P>,
-        state: &State,
-        h: &mut HashMap<AtomView<'a, P>, Atom<P>>,
-        rest: &mut Atom<P>,
+        x: Symbol,
+        workspace: &Workspace,
+
+        h: &mut HashMap<AtomView<'a>, Atom>,
+        rest: &mut Atom,
     ) {
         match self {
             AtomView::Add(_) => {}
@@ -153,18 +230,17 @@ impl<'a, P: AtomSet> AtomView<'a, P> {
                         }
                     }
 
-                    mul.set_dirty(true);
-
                     let mut col_n = workspace.new_atom();
-                    collected.as_view().normalize(workspace, state, &mut col_n);
+                    collected.as_view().normalize(workspace, &mut col_n);
 
                     h.entry(bracket.unwrap())
                         .and_modify(|e| {
                             let mut res = workspace.new_atom();
-                            e.add(state, workspace, col_n.as_view(), &mut res);
+                            e.as_view()
+                                .add_with_ws_into(workspace, col_n.as_view(), &mut res);
                             std::mem::swap(e, &mut res);
                         })
-                        .or_insert(Atom::new_from_view(&col_n.as_view()));
+                        .or_insert(col_n.as_view().to_owned());
 
                     return;
                 }
@@ -176,10 +252,11 @@ impl<'a, P: AtomSet> AtomView<'a, P> {
                     h.entry(*self)
                         .and_modify(|e| {
                             let mut res = workspace.new_atom();
-                            e.add(state, workspace, col_n.as_view(), &mut res);
+                            e.as_view()
+                                .add_with_ws_into(workspace, col_n.as_view(), &mut res);
                             std::mem::swap(e, &mut res);
                         })
-                        .or_insert(Atom::new_from_view(&col_n.as_view()));
+                        .or_insert(col_n.as_view().to_owned());
 
                     return;
                 }
@@ -187,7 +264,8 @@ impl<'a, P: AtomSet> AtomView<'a, P> {
         }
 
         let mut new_atom = workspace.new_atom();
-        rest.add(state, workspace, *self, &mut new_atom);
-        std::mem::swap(rest, new_atom.get_mut());
+        rest.as_view()
+            .add_with_ws_into(workspace, *self, &mut new_atom);
+        std::mem::swap(rest, &mut new_atom);
     }
 }

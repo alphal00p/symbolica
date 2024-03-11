@@ -15,7 +15,6 @@ use crate::{
         Variable,
     },
     printer::{PrintOptions, RationalPolynomialPrinter},
-    state::State,
 };
 
 use super::{
@@ -126,11 +125,6 @@ impl<R: Ring, E: Exponent> RationalPolynomial<R, E> {
 
     pub fn is_constant(&self) -> bool {
         self.numerator.is_constant() && self.denominator.is_constant()
-    }
-
-    /// Constuct a pretty-printer for the rational polynomial.
-    pub fn printer<'a, 'b>(&'a self, state: &'b State) -> RationalPolynomialPrinter<'a, 'b, R, E> {
-        RationalPolynomialPrinter::new(self, state)
     }
 
     /// Convert the coefficient from the current field to a finite field.
@@ -423,21 +417,13 @@ where
 
 impl<R: Ring, E: Exponent> Display for RationalPolynomial<R, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.denominator.is_one() {
-            self.numerator.fmt(f)
-        } else {
-            if f.sign_plus() {
-                f.write_char('+')?;
-            }
-
-            f.write_fmt(format_args!("({})/({})", self.numerator, self.denominator))
-        }
+        RationalPolynomialPrinter::new(self).fmt(f)
     }
 }
 
 impl<R: Ring, E: Exponent> Display for RationalPolynomialField<R, E> {
     fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Ok(()) // FIXME
+        Ok(())
     }
 }
 
@@ -551,7 +537,6 @@ where
     fn fmt_display(
         &self,
         element: &Self::Element,
-        state: Option<&State>,
         opts: &PrintOptions,
         in_product: bool,
         f: &mut Formatter<'_>,
@@ -560,21 +545,14 @@ where
             f.write_char('+')?;
         }
 
-        if let Some(state) = state {
-            f.write_fmt(format_args!(
-                "{}",
-                RationalPolynomialPrinter {
-                    poly: element,
-                    state,
-                    opts: *opts,
-                    add_parentheses: in_product
-                },
-            ))
-        } else if in_product {
-            f.write_fmt(format_args!("({})", element))
-        } else {
-            f.write_fmt(format_args!("{}", element))
-        }
+        f.write_fmt(format_args!(
+            "{}",
+            RationalPolynomialPrinter {
+                poly: element,
+                opts: *opts,
+                add_parentheses: in_product
+            },
+        ))
     }
 }
 

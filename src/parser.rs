@@ -10,8 +10,8 @@ use crate::{
     coefficient::ConvertToRing,
     domains::Ring,
     poly::{polynomial::MultivariatePolynomial, Exponent, Variable},
-    representations::{Atom, AtomSet, OwnedAdd, OwnedFun, OwnedMul, OwnedNum, OwnedPow, OwnedVar},
-    state::{ResettableBuffer, State, Workspace},
+    representations::Atom,
+    state::{State, Workspace},
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -274,38 +274,37 @@ impl Token {
     }
 
     /// Parse the token into an atom.
-    pub fn to_atom<P: AtomSet>(
-        &self,
-        state: &mut State,
-        workspace: &Workspace<P>,
-    ) -> Result<Atom<P>, String> {
-        let mut atom = Atom::new();
-        self.to_atom_with_output(state, workspace, &mut atom)?;
+    pub fn to_atom(&self, workspace: &Workspace) -> Result<Atom, String> {
+        let mut atom = Atom::default();
+
+        let mut state = State::get_global_state().write().unwrap();
+        self.to_atom_with_output(&mut state, workspace, &mut atom)?;
+
         Ok(atom)
     }
 
     /// Parse the token into the atom `out`.
-    pub fn to_atom_with_output<P: AtomSet>(
+    fn to_atom_with_output(
         &self,
         state: &mut State,
-        workspace: &Workspace<P>,
-        out: &mut Atom<P>,
+        workspace: &Workspace,
+        out: &mut Atom,
     ) -> Result<(), String> {
         match self {
             Token::Number(n) => {
                 if let Ok(x) = n.parse::<i64>() {
-                    out.to_num().set_from_coeff(x.into());
+                    out.to_num(x.into());
                 } else {
                     match Integer::parse(n) {
                         Ok(x) => {
-                            out.to_num().set_from_coeff(x.complete().into());
+                            out.to_num(x.complete().into());
                         }
                         Err(e) => return Err(format!("Could not parse number: {}", e)),
                     }
                 }
             }
             Token::ID(x) => {
-                out.to_var().set_from_id(state.get_or_insert_var(x));
+                out.to_var(state.get_or_insert_var_impl(x));
             }
             Token::Op(_, _, op, args) => match op {
                 Operator::Mul => {
@@ -318,8 +317,7 @@ impl Token {
                         mul.extend(atom.as_view());
                     }
 
-                    mul.set_dirty(true);
-                    mul_h.as_view().normalize(workspace, state, out);
+                    mul_h.as_view().normalize(workspace, out);
                 }
                 Operator::Add => {
                     let mut add_h = workspace.new_atom();
@@ -331,8 +329,7 @@ impl Token {
                         add.extend(atom.as_view());
                     }
 
-                    add.set_dirty(true);
-                    add_h.as_view().normalize(workspace, state, out);
+                    add_h.as_view().normalize(workspace, out);
                 }
                 Operator::Pow => {
                     let mut base = workspace.new_atom();
@@ -342,10 +339,8 @@ impl Token {
                     args[1].to_atom_with_output(state, workspace, &mut exp)?;
 
                     let mut pow_h = workspace.new_atom();
-                    let pow = pow_h.to_pow();
-                    pow.set_from_base_and_exp(base.as_view(), exp.as_view());
-                    pow.set_dirty(true);
-                    pow_h.as_view().normalize(workspace, state, out);
+                    pow_h.to_pow(base.as_view(), exp.as_view());
+                    pow_h.as_view().normalize(workspace, out);
                 }
                 Operator::Argument => return Err("Unexpected argument operator".into()),
                 Operator::Neg => {
@@ -360,8 +355,7 @@ impl Token {
                     let mul = mul_h.to_mul();
                     mul.extend(base.as_view());
                     mul.extend(num.as_view());
-                    mul.set_dirty(true);
-                    mul_h.as_view().normalize(workspace, state, out);
+                    mul_h.as_view().normalize(workspace, out);
                 }
                 Operator::Inv => {
                     debug_assert!(args.len() == 1);
@@ -372,10 +366,8 @@ impl Token {
                     let num = workspace.new_num(-1);
 
                     let mut pow_h = workspace.new_atom();
-                    let mul = pow_h.to_pow();
-                    mul.set_from_base_and_exp(base.as_view(), num.as_view());
-                    mul.set_dirty(true);
-                    pow_h.as_view().normalize(workspace, state, out);
+                    pow_h.to_pow(base.as_view(), num.as_view());
+                    pow_h.as_view().normalize(workspace, out);
                 }
             },
             Token::Fn(_, args) => {
@@ -385,16 +377,175 @@ impl Token {
                 };
 
                 let mut fun_h = workspace.new_atom();
-                let fun = fun_h.to_fun();
-                fun.set_from_name(state.get_or_insert_fn(name, None)?);
-                fun.set_dirty(true);
+                let fun = fun_h.to_fun(state.get_or_insert_fn_impl(name, None)?);
                 let mut atom = workspace.new_atom();
                 for a in args.iter().skip(1) {
                     a.to_atom_with_output(state, workspace, &mut atom)?;
                     fun.add_arg(atom.as_view());
                 }
 
-                fun_h.as_view().normalize(workspace, state, out);
+                fun_h.as_view().normalize(workspace, out);
+            }
+            x => return Err(format!("Unexpected token {}", x)),
+        }
+
+        Ok(())
+    }
+
+    /// Parse the token into the atom `out` with pre-defined variables
+    pub fn to_atom_with_output_and_var_map(
+        &self,
+        workspace: &Workspace,
+        var_map: &Arc<Vec<Variable>>,
+        var_name_map: &[SmartString<LazyCompact>],
+        out: &mut Atom,
+    ) -> Result<(), String> {
+        match self {
+            Token::Number(n) => {
+                if let Ok(x) = n.parse::<i64>() {
+                    out.to_num(x.into());
+                } else {
+                    match Integer::parse(n) {
+                        Ok(x) => {
+                            out.to_num(x.complete().into());
+                        }
+                        Err(e) => return Err(format!("Could not parse number: {}", e)),
+                    }
+                }
+            }
+            Token::ID(name) => {
+                let index = var_name_map
+                    .iter()
+                    .position(|x| x == name)
+                    .ok_or_else(|| format!("Undefined variable {}", name))?;
+                if let Variable::Symbol(id) = var_map[index] {
+                    out.to_var(id);
+                } else {
+                    Err(format!("Undefined variable {}", name))?;
+                }
+            }
+            Token::Op(_, _, op, args) => match op {
+                Operator::Mul => {
+                    let mut mul_h = workspace.new_atom();
+                    let mul = mul_h.to_mul();
+
+                    let mut atom = workspace.new_atom();
+                    for a in args {
+                        a.to_atom_with_output_and_var_map(
+                            workspace,
+                            var_map,
+                            var_name_map,
+                            &mut atom,
+                        )?;
+                        mul.extend(atom.as_view());
+                    }
+
+                    mul_h.as_view().normalize(workspace, out);
+                }
+                Operator::Add => {
+                    let mut add_h = workspace.new_atom();
+                    let add = add_h.to_add();
+
+                    let mut atom = workspace.new_atom();
+                    for a in args {
+                        a.to_atom_with_output_and_var_map(
+                            workspace,
+                            var_map,
+                            var_name_map,
+                            &mut atom,
+                        )?;
+                        add.extend(atom.as_view());
+                    }
+
+                    add_h.as_view().normalize(workspace, out);
+                }
+                Operator::Pow => {
+                    let mut base = workspace.new_atom();
+                    args[0].to_atom_with_output_and_var_map(
+                        workspace,
+                        var_map,
+                        var_name_map,
+                        &mut base,
+                    )?;
+
+                    let mut exp = workspace.new_atom();
+                    args[1].to_atom_with_output_and_var_map(
+                        workspace,
+                        var_map,
+                        var_name_map,
+                        &mut exp,
+                    )?;
+
+                    let mut pow_h = workspace.new_atom();
+                    pow_h.to_pow(base.as_view(), exp.as_view());
+                    pow_h.as_view().normalize(workspace, out);
+                }
+                Operator::Argument => return Err("Unexpected argument operator".into()),
+                Operator::Neg => {
+                    debug_assert!(args.len() == 1);
+
+                    let mut base = workspace.new_atom();
+                    args[0].to_atom_with_output_and_var_map(
+                        workspace,
+                        var_map,
+                        var_name_map,
+                        &mut base,
+                    )?;
+
+                    let num = workspace.new_num(-1);
+
+                    let mut mul_h = workspace.new_atom();
+                    let mul = mul_h.to_mul();
+                    mul.extend(base.as_view());
+                    mul.extend(num.as_view());
+                    mul_h.as_view().normalize(workspace, out);
+                }
+                Operator::Inv => {
+                    debug_assert!(args.len() == 1);
+
+                    let mut base = workspace.new_atom();
+                    args[0].to_atom_with_output_and_var_map(
+                        workspace,
+                        var_map,
+                        var_name_map,
+                        &mut base,
+                    )?;
+
+                    let num = workspace.new_num(-1);
+
+                    let mut pow_h = workspace.new_atom();
+                    pow_h.to_pow(base.as_view(), num.as_view());
+                    pow_h.as_view().normalize(workspace, out);
+                }
+            },
+            Token::Fn(_, args) => {
+                let name = match &args[0] {
+                    Token::ID(s) => s,
+                    _ => unreachable!(),
+                };
+
+                let index = var_name_map
+                    .iter()
+                    .position(|x| x == name)
+                    .ok_or_else(|| format!("Undefined variable {}", name))?;
+                if let Variable::Symbol(id) = var_map[index] {
+                    let mut fun_h = workspace.new_atom();
+                    let fun = fun_h.to_fun(id);
+                    let mut atom = workspace.new_atom();
+                    for a in args.iter().skip(1) {
+                        a.to_atom_with_output_and_var_map(
+                            workspace,
+                            var_map,
+                            var_name_map,
+                            &mut atom,
+                        )?;
+                        fun.add_arg(atom.as_view());
+                    }
+
+                    fun_h.as_view().normalize(workspace, out);
+                } else {
+                    Err(format!("Undefined variable {}", name))?;
+                }
             }
             x => return Err(format!("Unexpected token {}", x)),
         }

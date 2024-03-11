@@ -38,12 +38,11 @@ fn main() {
         );
     }
 
-    let mut state = State::new();
-    let workspace = Workspace::default();
+    let workspace = Workspace::new();
     let vars: Arc<Vec<_>> = Arc::new(
         var_names
             .iter()
-            .map(|v| state.get_or_insert_var(v).into())
+            .map(|v| State::get_or_insert_var(v).into())
             .collect(),
     );
 
@@ -71,7 +70,6 @@ fn main() {
             .unwrap()
             .to_rational_polynomial(
                 &workspace,
-                &mut state,
                 &RationalField::new(),
                 &IntegerRing::new(),
                 &vars,
@@ -83,7 +81,6 @@ fn main() {
             "{}",
             RationalPolynomialPrinter {
                 poly: &r,
-                state: &state,
                 opts: print_opt,
                 add_parentheses: false
             }

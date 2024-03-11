@@ -9,7 +9,7 @@ use rug::{
     Rational as MultiPrecisionRational,
 };
 
-use crate::{poly::gcd::LARGE_U32_PRIMES, printer::PrintOptions, state::State, utils};
+use crate::{poly::gcd::LARGE_U32_PRIMES, printer::PrintOptions, utils};
 
 use super::{
     finite_field::{FiniteField, FiniteFieldCore, FiniteFieldWorkspace, ToFiniteField},
@@ -46,6 +46,13 @@ pub enum Rational {
     Large(MultiPrecisionRational),
 }
 
+impl From<i32> for Rational {
+    #[inline]
+    fn from(value: i32) -> Self {
+        Rational::Natural(value as i64, 1)
+    }
+}
+
 impl From<i64> for Rational {
     #[inline]
     fn from(value: i64) -> Self {
@@ -77,7 +84,7 @@ impl From<&Integer> for Rational {
 impl From<Integer> for Rational {
     fn from(value: Integer) -> Self {
         match value {
-            Integer::Natural(n) => Rational::Natural(n.into(), 1),
+            Integer::Natural(n) => Rational::Natural(n, 1),
             Integer::Double(r) => Rational::Large(MultiPrecisionRational::from(r)),
             Integer::Large(r) => Rational::Large(MultiPrecisionRational::from(r)),
         }
@@ -628,7 +635,6 @@ impl Ring for RationalField {
     fn fmt_display(
         &self,
         element: &Self::Element,
-        _state: Option<&State>,
         _opts: &PrintOptions,
         _in_product: bool,
         f: &mut Formatter<'_>,

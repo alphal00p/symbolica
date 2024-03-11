@@ -12,7 +12,7 @@ use rug::{
     Complete, Integer as MultiPrecisionInteger,
 };
 
-use crate::{printer::PrintOptions, state::State, utils};
+use crate::{printer::PrintOptions, utils};
 
 use super::{
     finite_field::{FiniteField, FiniteFieldCore, FiniteFieldWorkspace, Mersenne64, ToFiniteField},
@@ -48,6 +48,13 @@ pub enum Integer {
     Natural(i64),
     Double(i128),
     Large(MultiPrecisionInteger),
+}
+
+impl From<i32> for Integer {
+    #[inline]
+    fn from(value: i32) -> Self {
+        Integer::Natural(value as i64)
+    }
 }
 
 impl From<i64> for Integer {
@@ -697,7 +704,6 @@ impl Ring for IntegerRing {
     fn fmt_display(
         &self,
         element: &Self::Element,
-        _state: Option<&State>,
         _opts: &PrintOptions,
         _in_product: bool,
         f: &mut Formatter<'_>,
@@ -1473,7 +1479,6 @@ impl Ring for MultiPrecisionIntegerRing {
     fn fmt_display(
         &self,
         element: &Self::Element,
-        _state: Option<&State>,
         _opts: &PrintOptions,
         _in_product: bool,
         f: &mut Formatter<'_>,

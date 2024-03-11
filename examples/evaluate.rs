@@ -1,30 +1,19 @@
 use ahash::HashMap;
 use symbolica::evaluate::EvaluationFn;
-use symbolica::{
-    representations::Atom,
-    state::{State, Workspace},
-};
+use symbolica::{representations::Atom, state::State};
 
 fn main() {
-    let mut state = State::new();
-    let workspace: Workspace = Workspace::new();
-
-    let x = state.get_or_insert_var("x");
-    let f = state.get_or_insert_var("f");
-    let g = state.get_or_insert_var("g");
-    let p0 = Atom::parse("p(0)", &mut state, &workspace).unwrap();
-    let a = Atom::parse(
-        "x*cos(x) + f(x, 1)^2 + g(g(x)) + p(0)",
-        &mut state,
-        &workspace,
-    )
-    .unwrap();
+    let x = State::get_or_insert_var("x");
+    let f = State::get_or_insert_var("f");
+    let g = State::get_or_insert_var("g");
+    let p0 = Atom::parse("p(0)").unwrap();
+    let a = Atom::parse("x*cos(x) + f(x, 1)^2 + g(g(x)) + p(0)").unwrap();
 
     let mut const_map = HashMap::default();
-    let mut fn_map: HashMap<_, EvaluationFn<_, _>> = HashMap::default();
+    let mut fn_map: HashMap<_, EvaluationFn<_>> = HashMap::default();
     let mut cache = HashMap::default();
 
-    // x = 6.
+    // x = 6 and p(0) = 7
     let v = Atom::new_var(x);
     const_map.insert(v.as_view(), 6.);
     const_map.insert(p0.as_view(), 7.);
@@ -47,6 +36,6 @@ fn main() {
 
     println!(
         "Result for x = 6.: {}",
-        a.as_view().evaluate::<f64>(&const_map, &fn_map, &mut cache)
+        a.evaluate::<f64>(&const_map, &fn_map, &mut cache)
     );
 }
