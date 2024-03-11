@@ -53,11 +53,6 @@ impl Default for State {
     }
 }
 
-impl Default for State {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl State {
     pub const ARG: Symbol = Symbol::init_fn(0, 0, false, false, false);

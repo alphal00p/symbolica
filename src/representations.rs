@@ -1,8 +1,6 @@
 mod coefficient;
 pub mod default;
 
-use rand_xoshiro::rand_core::le;
-
 use crate::{
     coefficient::Coefficient,
     parser::Token,
@@ -586,9 +584,9 @@ impl FunctionBuilder {
     /// Finish the function construction and return an `Atom`.
     pub fn finish(self) -> Atom {
         Workspace::get_local().with(|ws| {
-            let mut t = ws.new_atom();
-            self.handle.as_view().normalize(ws, &mut t);
-            t.into_inner()
+            let mut f = ws.new_atom();
+            self.handle.as_view().normalize(ws, &mut f);
+            f.into_inner()
         })
     }
 }

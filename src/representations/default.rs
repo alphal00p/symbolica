@@ -114,10 +114,7 @@ impl Num {
         self.data
     }
 
-    #[inline(always)]
-    fn as_view(&self) -> AtomView<Self::P> {
-        AtomView::Num(self.to_num_view())
-    }
+    
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
