@@ -70,8 +70,8 @@ pub enum Transformer {
     ReplaceAll(
         Pattern,
         Pattern,
-        Option<Condition<WildcardAndRestriction>>,
-        Option<MatchSettings>,
+        Condition<WildcardAndRestriction>,
+        MatchSettings,
     ),
     /// Take the product of a list of arguments in the rhs.
     Product,
@@ -191,8 +191,8 @@ impl Transformer {
                         input,
                         rhs,
                         workspace,
-                        cond.as_ref(),
-                        settings.as_ref(),
+                        cond.into(),
+                        settings.into(),
                         out,
                     );
                 }
@@ -463,7 +463,7 @@ impl Transformer {
                 Transformer::FromNumber => {
                     if let AtomView::Num(n) = input {
                         if let CoefficientView::RationalPolynomial(r) = n.get_coeff_view() {
-                            r.to_expression(workspace, &HashMap::default(), out);
+                            r.to_expression_with_map(workspace, &HashMap::default(), out);
                             continue;
                         }
                     }

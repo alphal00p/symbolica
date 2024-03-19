@@ -1,18 +1,68 @@
 use std::{fmt::Write, string::String, sync::Arc};
 
 use bytes::Buf;
-use rug::{Complete, Integer};
+use rug::Integer as MultiPrecisionInteger;
 
 use smallvec::SmallVec;
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
     coefficient::ConvertToRing,
-    domains::Ring,
+    domains::{integer::Integer, Ring},
     poly::{polynomial::MultivariatePolynomial, Exponent, Variable},
     representations::Atom,
     state::{State, Workspace},
 };
+
+const HEX_DIGIT_MASK: [bool; 255] = [
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, true, true, true, true, true,
+    true, true, true, true, true, false, false, false, false, false, false, false, true, true,
+    true, true, true, true, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false,
+];
+
+const DIGIT_MASK: [bool; 255] = [
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, true, true, true, true, true,
+    true, true, true, true, true, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false,
+];
+
+const HEX_TO_DIGIT: [u8; 24] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, 0, 10, 11, 12, 13, 14, 15, 0,
+];
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum ParseState {
@@ -291,20 +341,14 @@ impl Token {
         out: &mut Atom,
     ) -> Result<(), String> {
         match self {
-            Token::Number(n) => {
-                if let Ok(x) = n.parse::<i64>() {
+            Token::Number(n) => match n.parse::<Integer>() {
+                Ok(x) => {
                     out.to_num(x.into());
-                } else {
-                    match Integer::parse(n) {
-                        Ok(x) => {
-                            out.to_num(x.complete().into());
-                        }
-                        Err(e) => return Err(format!("Could not parse number: {}", e)),
-                    }
                 }
-            }
+                Err(e) => return Err(format!("Could not parse number: {}", e)),
+            },
             Token::ID(x) => {
-                out.to_var(state.get_or_insert_var_impl(x));
+                out.to_var(state.get_symbol_impl(x));
             }
             Token::Op(_, _, op, args) => match op {
                 Operator::Mul => {
@@ -377,7 +421,7 @@ impl Token {
                 };
 
                 let mut fun_h = workspace.new_atom();
-                let fun = fun_h.to_fun(state.get_or_insert_fn_impl(name, None)?);
+                let fun = fun_h.to_fun(state.get_symbol_impl(name));
                 let mut atom = workspace.new_atom();
                 for a in args.iter().skip(1) {
                     a.to_atom_with_output(state, workspace, &mut atom)?;
@@ -402,16 +446,7 @@ impl Token {
     ) -> Result<(), String> {
         match self {
             Token::Number(n) => {
-                if let Ok(x) = n.parse::<i64>() {
-                    out.to_num(x.into());
-                } else {
-                    match Integer::parse(n) {
-                        Ok(x) => {
-                            out.to_num(x.complete().into());
-                        }
-                        Err(e) => return Err(format!("Could not parse number: {}", e)),
-                    }
-                }
+                out.to_num(n.parse::<Integer>()?.into());
             }
             Token::ID(name) => {
                 let index = var_name_map
@@ -608,17 +643,24 @@ impl Token {
                     }
                 }
                 ParseState::RationalPolynomial => {
-                    if c == ']' {
-                        stack.push(Token::RationalPolynomial(id_buffer.as_str().into()));
-                        id_buffer.clear();
+                    let start = char_iter.clone();
+                    let mut pos = 0;
 
-                        state = ParseState::Any;
+                    let mut s = SmartString::new();
+                    s.push(c);
 
-                        column_counter += 1;
+                    while c != ']' {
+                        pos += 1;
                         c = char_iter.next().unwrap_or('\0');
-                    } else if !whitespace.contains(&c) {
-                        id_buffer.push(c);
                     }
+
+                    s.push_str(&start.as_str()[..pos - 1]);
+                    stack.push(Token::RationalPolynomial(s));
+
+                    state = ParseState::Any;
+
+                    column_counter += pos + 1;
+                    c = char_iter.next().unwrap_or('\0');
                 }
                 ParseState::Any => {}
             }
@@ -901,6 +943,8 @@ impl Token {
 
         let mut last_pos = input;
         let mut c = input.get_u8();
+
+        let mut digit_buffer = vec![];
         loop {
             if c == b'(' || c == b')' || c == b'/' {
                 break;
@@ -924,40 +968,84 @@ impl Token {
                 c = input.get_u8();
             }
 
-            loop {
-                if !c.is_ascii_digit() {
-                    break;
-                }
+            let mut is_hex = false;
+            let mask = if c == b'#' {
+                is_hex = true;
+                last_pos = input;
+                c = input.get_u8();
+                &HEX_DIGIT_MASK
+            } else {
+                &DIGIT_MASK
+            };
 
-                if input.is_empty() {
-                    break;
-                }
-
+            while mask[c as usize] && !input.is_empty() {
                 last_pos = input;
                 c = input.get_u8();
             }
 
             // construct number
             let mut len = unsafe { input.as_ptr().offset_from(num_start.as_ptr()) } as usize;
-            if !c.is_ascii_digit() && (len > 1 || c != b'-') {
+            let mut last_read_is_non_digit = false;
+            if !mask[c as usize] && (len > 1 || c != b'-') {
+                last_read_is_non_digit = true;
                 len -= 1;
             }
 
             if len > 0 {
-                let n = unsafe { std::str::from_utf8_unchecked(&num_start[..len]) };
+                coeff = 'read_coeff: {
+                    if len == 1 && num_start[0] == b'-' {
+                        break 'read_coeff field.neg(&field.one());
+                    }
 
-                if len == 1 && num_start[0] == b'-' {
-                    coeff = field.neg(&field.one());
-                } else {
-                    coeff = if let Ok(x) = n.parse::<i64>() {
-                        field.element_from_coefficient(x.into())
-                    } else {
-                        match Integer::parse(n) {
-                            Ok(x) => field.element_from_coefficient(x.complete().into()),
-                            Err(e) => panic!("Could not parse number: {}", e),
+                    if !is_hex && len <= 40 {
+                        let n = unsafe { std::str::from_utf8_unchecked(&num_start[..len]) };
+
+                        if len <= 20 {
+                            if let Ok(n) = n.parse::<i64>() {
+                                break 'read_coeff field.element_from_coefficient(n.into());
+                            }
                         }
+
+                        if let Ok(n) = n.parse::<i128>() {
+                            break 'read_coeff field
+                                .element_from_coefficient(Integer::Double(n).into());
+                        }
+                    }
+
+                    let (is_negative, digits) = if num_start[0] == b'-' {
+                        (true, &num_start[1..len])
+                    } else {
+                        (false, &num_start[..len])
                     };
+
+                    digit_buffer.clear();
+
+                    if is_hex {
+                        digit_buffer.extend(
+                            digits[1..]
+                                .iter()
+                                .map(|&x| HEX_TO_DIGIT[(x - b'0') as usize]),
+                        );
+                    } else {
+                        digit_buffer.extend(digits.iter().map(|&x| (x - b'0')));
+                    }
+
+                    let mut p = MultiPrecisionInteger::new();
+                    unsafe {
+                        p.assign_bytes_radix_unchecked(
+                            &digit_buffer,
+                            if is_hex { 16 } else { 10 },
+                            is_negative,
+                        )
+                    };
+
+                    field.element_from_coefficient(p.into())
                 }
+            }
+
+            if input.is_empty() && !last_read_is_non_digit {
+                poly.append_monomial(coeff, &exponents);
+                break;
             }
 
             if c == b'-' {

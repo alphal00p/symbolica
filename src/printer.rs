@@ -9,7 +9,9 @@ use crate::{
         finite_field::FiniteFieldCore, rational_polynomial::RationalPolynomial, Ring, RingPrinter,
     },
     poly::{polynomial::MultivariatePolynomial, Exponent, MonomialOrder},
-    representations::{default::FunView, AddView, AtomView, MulView, NumView, PowView, VarView},
+    representations::{
+        default::FunView, AddView, AtomView, MulView, NumView, PowView, Symbol, VarView,
+    },
     state::State,
     tensors::matrix::Matrix,
 };
@@ -137,7 +139,7 @@ impl<'a> AtomPrinter<'a> {
     }
 }
 
-impl<'a, 'b> fmt::Display for AtomPrinter<'a> {
+impl<'a> fmt::Display for AtomPrinter<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let print_state = PrintState {
             level: 0,
@@ -145,6 +147,12 @@ impl<'a, 'b> fmt::Display for AtomPrinter<'a> {
             superscript: false,
         };
         self.atom.fmt_output(f, &self.print_opts, print_state)
+    }
+}
+
+impl std::fmt::Display for Symbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&State::get_name(*self))
     }
 }
 
@@ -200,7 +208,15 @@ impl<'a> FormattedPrintVar for VarView<'a> {
 
         let id = self.get_symbol();
         let name = State::get_name(id);
-        if name.ends_with('_') {
+
+        if opts.latex {
+            match id {
+                State::E => f.write_char('e'),
+                State::PI => f.write_str("\\pi"),
+                State::I => f.write_char('i'),
+                _ => f.write_str(name),
+            }
+        } else if name.ends_with('_') {
             f.write_fmt(format_args!("{}", name.as_str().cyan().italic()))
         } else if opts.color_builtin_functions && State::is_builtin(id) {
             f.write_fmt(format_args!("{}", name.as_str().purple()))
@@ -337,7 +353,6 @@ impl<'a> FormattedPrintNum for NumView<'a> {
                 "[{}]",
                 RationalPolynomialPrinter {
                     poly: p,
-
                     opts: *opts,
                     add_parentheses: false,
                 }
@@ -401,9 +416,17 @@ impl<'a> FormattedPrintMul for MulView<'a> {
             first = false;
 
             if let AtomView::Add(_) = x {
-                f.write_char('(')?;
+                if opts.latex {
+                    f.write_str("\\left(")?;
+                } else {
+                    f.write_char('(')?;
+                }
                 x.fmt_output(f, opts, print_state)?;
-                f.write_char(')')?;
+                if opts.latex {
+                    f.write_str("\\right)")?;
+                } else {
+                    f.write_char(')')?;
+                }
             } else {
                 x.fmt_output(f, opts, print_state)?;
             }
@@ -429,21 +452,30 @@ impl<'a> FormattedPrintFn for FunView<'a> {
 
         let id = self.get_symbol();
         let name = State::get_name(id);
-        if name.ends_with('_') {
-            f.write_fmt(format_args!("{}", name.as_str().cyan().italic()))?;
-        } else {
-            // check if the function name is built in
-            if opts.color_builtin_functions && State::is_builtin(id) {
-                f.write_fmt(format_args!("{}", name.as_str().purple()))?;
-            } else {
-                f.write_str(name)?;
-            }
-        }
 
-        if opts.square_brackets_for_function {
-            f.write_char('[')?;
+        if opts.latex {
+            if name == "cos" || name == "sin" || name == "exp" || name == "log" {
+                f.write_fmt(format_args!("\\{}\\!\\left(", name))?;
+            } else {
+                f.write_fmt(format_args!("{}\\!\\left(", name))?;
+            }
         } else {
-            f.write_char('(')?;
+            if name.ends_with('_') {
+                f.write_fmt(format_args!("{}", name.as_str().cyan().italic()))?;
+            } else {
+                // check if the function name is built in
+                if opts.color_builtin_functions && State::is_builtin(id) {
+                    f.write_fmt(format_args!("{}", name.as_str().purple()))?;
+                } else {
+                    f.write_str(name)?;
+                }
+            }
+
+            if opts.square_brackets_for_function {
+                f.write_char('[')?;
+            } else {
+                f.write_char('(')?;
+            }
         }
 
         print_state.level += 1;
@@ -458,7 +490,9 @@ impl<'a> FormattedPrintFn for FunView<'a> {
             x.fmt_output(f, opts, print_state)?;
         }
 
-        if opts.square_brackets_for_function {
+        if opts.latex {
+            f.write_str("\\right)")
+        } else if opts.square_brackets_for_function {
             f.write_char(']')
         } else {
             f.write_char(')')
@@ -516,9 +550,17 @@ impl<'a> FormattedPrintPow for PowView<'a> {
                 };
 
         if base_needs_parentheses {
-            f.write_char('(')?;
+            if opts.latex {
+                f.write_str("\\left(")?;
+            } else {
+                f.write_char('(')?;
+            }
             b.fmt_output(f, opts, print_state)?;
-            f.write_char(')')?;
+            if opts.latex {
+                f.write_str("\\right)")?;
+            } else {
+                f.write_char(')')?;
+            }
         } else {
             b.fmt_output(f, opts, print_state)?;
         }
@@ -595,7 +637,6 @@ impl<'a, R: Ring, E: Exponent> FactorizedRationalPolynomialPrinter<'a, R, E> {
     ) -> FactorizedRationalPolynomialPrinter<'a, R, E> {
         FactorizedRationalPolynomialPrinter {
             poly,
-
             opts: PrintOptions::default(),
             add_parentheses: false,
         }
@@ -607,7 +648,6 @@ impl<'a, R: Ring, E: Exponent> FactorizedRationalPolynomialPrinter<'a, R, E> {
     ) -> FactorizedRationalPolynomialPrinter<'a, R, E> {
         FactorizedRationalPolynomialPrinter {
             poly,
-
             opts,
             add_parentheses: false,
         }
@@ -617,6 +657,20 @@ impl<'a, R: Ring, E: Exponent> FactorizedRationalPolynomialPrinter<'a, R, E> {
 impl<'a, R: Ring, E: Exponent> Display for FactorizedRationalPolynomialPrinter<'a, R, E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if self.opts.explicit_rational_polynomial {
+            if !R::is_zero(&self.poly.numer_coeff)
+                && !self.poly.numerator.field.is_one(&self.poly.numer_coeff)
+            {
+                f.write_fmt(format_args!(
+                    "[{}]*",
+                    RingPrinter {
+                        ring: &self.poly.numerator.field,
+                        element: &self.poly.numer_coeff,
+                        opts: self.opts,
+                        in_product: false
+                    }
+                ))?;
+            }
+
             if self.poly.denominators.is_empty()
                 && self.poly.numerator.field.is_one(&self.poly.denom_coeff)
             {
@@ -647,7 +701,7 @@ impl<'a, R: Ring, E: Exponent> Display for FactorizedRationalPolynomialPrinter<'
                         RingPrinter {
                             ring: &self.poly.numerator.field,
                             element: &self.poly.denom_coeff,
-                            opts: &self.opts,
+                            opts: self.opts,
                             in_product: false
                         },
                     ))?;
@@ -671,10 +725,36 @@ impl<'a, R: Ring, E: Exponent> Display for FactorizedRationalPolynomialPrinter<'
             return Ok(());
         }
 
+        if R::is_zero(&self.poly.numer_coeff) {
+            return f.write_char('0');
+        }
+
         if self.poly.denominators.is_empty()
             && self.poly.numerator.field.is_one(&self.poly.denom_coeff)
         {
-            if !self.add_parentheses || self.poly.numerator.nterms() < 2 {
+            if !self.poly.numerator.field.is_one(&self.poly.numer_coeff) {
+                f.write_fmt(format_args!(
+                    "{}",
+                    RingPrinter {
+                        ring: &self.poly.numerator.field,
+                        element: &self.poly.numer_coeff,
+                        opts: self.opts,
+                        in_product: false
+                    }
+                ))?;
+            }
+
+            if (self.poly.numerator.field.is_one(&self.poly.numer_coeff) && !self.add_parentheses)
+                || self.poly.numerator.nterms() < 2
+            {
+                if !self.poly.numerator.field.is_one(&self.poly.numer_coeff) {
+                    if self.poly.numerator.is_one() {
+                        return Ok(());
+                    }
+
+                    f.write_char('*')?;
+                }
+
                 f.write_fmt(format_args!(
                     "{}",
                     PolynomialPrinter {
@@ -684,6 +764,14 @@ impl<'a, R: Ring, E: Exponent> Display for FactorizedRationalPolynomialPrinter<'
                     }
                 ))
             } else {
+                if !self.poly.numerator.field.is_one(&self.poly.numer_coeff) {
+                    if self.poly.numerator.is_one() {
+                        return Ok(());
+                    }
+
+                    f.write_char('*')?;
+                }
+
                 f.write_fmt(format_args!(
                     "({})",
                     PolynomialPrinter {
@@ -695,6 +783,18 @@ impl<'a, R: Ring, E: Exponent> Display for FactorizedRationalPolynomialPrinter<'
             }
         } else {
             if self.opts.latex {
+                if !self.poly.numerator.field.is_one(&self.poly.numer_coeff) {
+                    f.write_fmt(format_args!(
+                        "{} ",
+                        RingPrinter {
+                            ring: &self.poly.numerator.field,
+                            element: &self.poly.numer_coeff,
+                            opts: self.opts,
+                            in_product: false
+                        }
+                    ))?;
+                }
+
                 f.write_fmt(format_args!(
                     "\\frac{{{}}}{{",
                     PolynomialPrinter {
@@ -710,7 +810,7 @@ impl<'a, R: Ring, E: Exponent> Display for FactorizedRationalPolynomialPrinter<'
                         RingPrinter {
                             ring: &self.poly.numerator.field,
                             element: &self.poly.denom_coeff,
-                            opts: &self.opts,
+                            opts: self.opts,
                             in_product: false
                         }
                     ))?;
@@ -742,6 +842,18 @@ impl<'a, R: Ring, E: Exponent> Display for FactorizedRationalPolynomialPrinter<'
                 return f.write_str("}}");
             }
 
+            if !self.poly.numerator.field.is_one(&self.poly.numer_coeff) {
+                f.write_fmt(format_args!(
+                    "{}*",
+                    RingPrinter {
+                        ring: &self.poly.numerator.field,
+                        element: &self.poly.numer_coeff,
+                        opts: self.opts,
+                        in_product: false
+                    }
+                ))?;
+            }
+
             if self.poly.numerator.nterms() < 2 {
                 f.write_fmt(format_args!(
                     "{}",
@@ -770,7 +882,7 @@ impl<'a, R: Ring, E: Exponent> Display for FactorizedRationalPolynomialPrinter<'
                     RingPrinter {
                         ring: &self.poly.numerator.field,
                         element: &self.poly.denom_coeff,
-                        opts: &self.opts,
+                        opts: self.opts,
                         in_product: true
                     }
                 ));
@@ -804,7 +916,7 @@ impl<'a, R: Ring, E: Exponent> Display for FactorizedRationalPolynomialPrinter<'
                     RingPrinter {
                         ring: &self.poly.numerator.field,
                         element: &self.poly.denom_coeff,
-                        opts: &self.opts,
+                        opts: self.opts,
                         in_product: true
                     }
                 ))?;
@@ -885,12 +997,10 @@ impl<'a, R: Ring, E: Exponent> Display for RationalPolynomialPrinter<'a, R, E> {
                     "[{},{}]",
                     PolynomialPrinter {
                         poly: &self.poly.numerator,
-
                         opts: self.opts,
                     },
                     PolynomialPrinter {
                         poly: &self.poly.denominator,
-
                         opts: self.opts,
                     }
                 ))?;
@@ -905,7 +1015,6 @@ impl<'a, R: Ring, E: Exponent> Display for RationalPolynomialPrinter<'a, R, E> {
                     "{}",
                     PolynomialPrinter {
                         poly: &self.poly.numerator,
-
                         opts: self.opts,
                     }
                 ))
@@ -914,7 +1023,6 @@ impl<'a, R: Ring, E: Exponent> Display for RationalPolynomialPrinter<'a, R, E> {
                     "({})",
                     PolynomialPrinter {
                         poly: &self.poly.numerator,
-
                         opts: self.opts,
                     }
                 ))
@@ -925,12 +1033,10 @@ impl<'a, R: Ring, E: Exponent> Display for RationalPolynomialPrinter<'a, R, E> {
                     "\\frac{{{}}}{{{}}}",
                     PolynomialPrinter {
                         poly: &self.poly.numerator,
-
                         opts: self.opts,
                     },
                     PolynomialPrinter {
                         poly: &self.poly.denominator,
-
                         opts: self.opts,
                     }
                 ));
@@ -941,7 +1047,6 @@ impl<'a, R: Ring, E: Exponent> Display for RationalPolynomialPrinter<'a, R, E> {
                     "{}",
                     PolynomialPrinter {
                         poly: &self.poly.numerator,
-
                         opts: self.opts,
                     }
                 ))?;
@@ -950,7 +1055,6 @@ impl<'a, R: Ring, E: Exponent> Display for RationalPolynomialPrinter<'a, R, E> {
                     "({})",
                     PolynomialPrinter {
                         poly: &self.poly.numerator,
-
                         opts: self.opts,
                     }
                 ))?;
@@ -977,7 +1081,6 @@ impl<'a, R: Ring, E: Exponent> Display for RationalPolynomialPrinter<'a, R, E> {
                         "/{}",
                         PolynomialPrinter {
                             poly: &self.poly.denominator,
-
                             opts: self.opts,
                         }
                     ));
@@ -1024,11 +1127,9 @@ impl<'a, F: Ring + Display, E: Exponent, O: MonomialOrder> Display
             f.write_char('+')?;
         }
 
-        let var_map = match self.poly.var_map.as_ref() {
-            Some(v) => v,
-            None => {
-                return write!(f, "{}", self.poly);
-            }
+        let var_map: Vec<String> = match self.poly.var_map.as_ref() {
+            Some(v) => v.iter().map(|v| v.to_string()).collect(),
+            None => (0..self.poly.nvars).map(|i| format!("x{}", i)).collect(),
         };
 
         let mut is_first_term = true;
@@ -1055,7 +1156,7 @@ impl<'a, F: Ring + Display, E: Exponent, O: MonomialOrder> Display
                         RingPrinter {
                             ring: &self.poly.field,
                             element: monomial.coefficient,
-                            opts: &self.opts,
+                            opts: self.opts,
                             in_product: true
                         }
                     )?;
@@ -1073,7 +1174,7 @@ impl<'a, F: Ring + Display, E: Exponent, O: MonomialOrder> Display
                     write!(f, "*")?;
                 }
 
-                f.write_str(&var_id.to_string())?;
+                f.write_str(var_id)?;
 
                 if e.to_u32() != 1 {
                     if self.opts.latex {
@@ -1130,7 +1231,7 @@ impl<'a, F: Ring + Display> Display for MatrixPrinter<'a, F> {
                         RingPrinter {
                             ring: &self.matrix.field,
                             element: c,
-                            opts: &self.opts,
+                            opts: self.opts,
                             in_product: false,
                         },
                     ))?;
@@ -1155,7 +1256,7 @@ impl<'a, F: Ring + Display> Display for MatrixPrinter<'a, F> {
                         RingPrinter {
                             ring: &self.matrix.field,
                             element: c,
-                            opts: &self.opts,
+                            opts: self.opts,
                             in_product: false,
                         },
                     ))?;

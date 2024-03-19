@@ -1,8 +1,6 @@
 mod coefficient;
 pub mod default;
 
-use rand_xoshiro::rand_core::le;
-
 use crate::{
     coefficient::Coefficient,
     parser::Token,
@@ -19,7 +17,7 @@ use self::default::{FunView, RawAtom};
 
 /// A symbol, for example the name of a variable or the name of a function,
 /// together with its properties.
-/// Should be created using `get_or_insert` of `State`.
+/// Should be created using `get_symbol` of `State`.
 #[derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Symbol {
     id: u32,
@@ -328,6 +326,16 @@ impl<'a> AtomView<'a> {
             .normalize(workspace, out);
     }
 
+    /// Get the symbol of a variable or function.
+    #[inline(always)]
+    pub fn get_symbol(&self) -> Option<Symbol> {
+        match self {
+            AtomView::Var(v) => Some(v.get_symbol()),
+            AtomView::Fun(f) => Some(f.get_symbol()),
+            _ => None,
+        }
+    }
+
     pub fn get_byte_size(&self) -> usize {
         match self {
             AtomView::Num(n) => n.get_byte_size(),
@@ -527,8 +535,18 @@ impl Atom {
         }
     }
 
+    /// Get the symbol of a variable or function.
     #[inline(always)]
-    pub fn set_normalized(&mut self, normalized: bool) {
+    pub fn get_symbol(&self) -> Option<Symbol> {
+        match self {
+            Atom::Var(v) => Some(v.get_symbol()),
+            Atom::Fun(f) => Some(f.get_symbol()),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_normalized(&mut self, normalized: bool) {
         match self {
             Atom::Num(_) => {}
             Atom::Var(_) => {}
@@ -586,9 +604,9 @@ impl FunctionBuilder {
     /// Finish the function construction and return an `Atom`.
     pub fn finish(self) -> Atom {
         Workspace::get_local().with(|ws| {
-            let mut t = ws.new_atom();
-            self.handle.as_view().normalize(ws, &mut t);
-            t.into_inner()
+            let mut f = ws.new_atom();
+            self.handle.as_view().normalize(ws, &mut f);
+            f.into_inner()
         })
     }
 }
