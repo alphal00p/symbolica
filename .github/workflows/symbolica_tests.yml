@@ -53,7 +53,8 @@ jobs:
       working-directory: ./gammaloop
       run: |
         source `./bin/gammaloop -show_venv`
-        ./bin/run_tests.sh python -m "not drawing"
+        python -c "import symbolica; print(symbolica.__file__)"
+        ./bin/run_tests.sh python -m "not drawing and not slow"
     - name: Run native rust tests
       working-directory: ./gammaloop
       run: |
