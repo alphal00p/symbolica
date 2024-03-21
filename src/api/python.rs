@@ -21,10 +21,10 @@ use smartstring::{LazyCompact, SmartString};
 
 use crate::{
     domains::{
-        finite_field::{FiniteField, FiniteFieldCore, ToFiniteField},
+        finite_field::{ToFiniteField, Zp},
         float::Complex,
-        integer::{Integer, IntegerRing},
-        rational::RationalField,
+        integer::{Integer, IntegerRing, Z},
+        rational::{Rational, RationalField, Q},
         rational_polynomial::{
             FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
         },
@@ -707,8 +707,9 @@ impl PythonPattern {
     /// Restrictions on pattern can be supplied through `cond`. The settings `non_greedy_wildcards` can be used to specify
     /// wildcards that try to match as little as possible.
     ///
-    /// The `level_range` specifies the `[min,max)` level at which the pattern is allowed to match.
-    /// The first level is 0 and the level is increased when going one level deeper in the expression tree.
+    /// The `level_range` specifies the `[min,max]` level at which the pattern is allowed to match.
+    /// The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree,
+    /// depending on `level_is_tree_depth`.
     ///
     /// Examples
     /// --------
@@ -725,6 +726,7 @@ impl PythonPattern {
         cond: Option<PythonPatternRestriction>,
         non_greedy_wildcards: Option<Vec<PythonExpression>>,
         level_range: Option<(usize, Option<usize>)>,
+        level_is_tree_depth: Option<bool>,
     ) -> PyResult<PythonPattern> {
         let mut settings = MatchSettings::default();
 
@@ -749,6 +751,9 @@ impl PythonPattern {
         }
         if let Some(level_range) = level_range {
             settings.level_range = level_range;
+        }
+        if let Some(level_is_tree_depth) = level_is_tree_depth {
+            settings.level_is_tree_depth = level_is_tree_depth;
         }
 
         return append_transformer!(
@@ -1292,22 +1297,49 @@ impl PythonExpression {
         Ok(result)
     }
 
-    /// Create a new Symbolica number.
+    /// Create a new Symbolica number from an int or a float.
+    /// A floating point number is converted to its rational number equivalent,
+    /// but it can also be truncated by specifying the maximal denominator value.
     ///
     /// Examples
     /// --------
     /// >>> e = Expression.num(1) / 2
     /// >>> print(e)
     /// 1/2
+    ///
+    /// >>> print(Expression.num(0.33))
+    /// >>> print(Expression.num(0.33, 5))
+    /// 5944751508129055/18014398509481984
+    /// 1/3
     #[classmethod]
-    pub fn num(_cls: &PyType, num: &PyLong) -> PyResult<PythonExpression> {
-        if let Ok(num) = num.extract::<i64>() {
+    pub fn num(
+        _cls: &PyType,
+        py: Python,
+        num: PyObject,
+        max_denom: Option<usize>,
+    ) -> PyResult<PythonExpression> {
+        if let Ok(num) = num.extract::<i64>(py) {
             Ok(PythonExpression {
                 expr: Arc::new(Atom::new_num(num)),
             })
-        } else {
+        } else if let Ok(num) = num.extract::<&PyLong>(py) {
             let a = format!("{}", num);
             PythonExpression::parse(_cls, &a)
+        } else if let Ok(f) = num.extract::<f64>(py) {
+            if !f.is_finite() {
+                return Err(exceptions::PyValueError::new_err("Number must be finite"));
+            }
+
+            let mut r: Rational = f.into();
+            if let Some(max_denom) = max_denom {
+                r = r.truncate_denominator(&(max_denom as u64).into())
+            }
+
+            Ok(PythonExpression {
+                expr: Arc::new(Atom::new_num(r)),
+            })
+        } else {
+            Err(exceptions::PyValueError::new_err("Not a valid number"))
         }
     }
 
@@ -2425,7 +2457,7 @@ impl PythonExpression {
 
         self.expr
             .as_view()
-            .to_polynomial(&RationalField::new(), var_map.as_ref())
+            .to_polynomial(&Q, var_map.as_ref())
             .map(|x| PythonPolynomial { poly: Arc::new(x) })
             .map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not convert to polynomial: {}", e))
@@ -2436,11 +2468,7 @@ impl PythonExpression {
     /// new independent variables.
     pub fn to_polynomial_with_conversion(&self) -> PythonPolynomial {
         PythonPolynomial {
-            poly: Arc::new(
-                self.expr
-                    .as_view()
-                    .to_polynomial_with_conversion(&RationalField::new()),
-            ),
+            poly: Arc::new(self.expr.as_view().to_polynomial_with_conversion(&Q)),
         }
     }
 
@@ -2479,7 +2507,7 @@ impl PythonExpression {
 
         self.expr
             .as_view()
-            .to_rational_polynomial(&RationalField::new(), &IntegerRing::new(), var_map.as_ref())
+            .to_rational_polynomial(&Q, &Z, var_map.as_ref())
             .map(|x| PythonRationalPolynomial { poly: Arc::new(x) })
             .map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not convert to polynomial: {}", e))
@@ -2514,7 +2542,7 @@ impl PythonExpression {
 
         self.expr
             .as_view()
-            .to_rational_polynomial(&RationalField::new(), &IntegerRing::new(), var_map.as_ref())
+            .to_rational_polynomial(&Q, &Z, var_map.as_ref())
             .map(|x| PythonRationalPolynomialSmallExponent { poly: Arc::new(x) })
             .map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not convert to polynomial: {}", e))
@@ -2527,7 +2555,7 @@ impl PythonExpression {
         let p = self
             .expr
             .as_view()
-            .to_rational_polynomial_with_conversion(&RationalField::new(), &IntegerRing::new());
+            .to_rational_polynomial_with_conversion(&Q, &Z);
 
         Ok(PythonRationalPolynomial { poly: Arc::new(p) })
     }
@@ -2550,12 +2578,14 @@ impl PythonExpression {
         lhs: ConvertibleToPattern,
         cond: Option<PythonPatternRestriction>,
         level_range: Option<(usize, Option<usize>)>,
+        level_is_tree_depth: Option<bool>,
     ) -> PyResult<PythonMatchIterator> {
         let conditions = cond
             .map(|r| r.condition.clone())
             .unwrap_or(Arc::new(Condition::default()));
         let settings = Arc::new(MatchSettings {
             level_range: level_range.unwrap_or((0, None)),
+            level_is_tree_depth: level_is_tree_depth.unwrap_or(false),
             ..MatchSettings::default()
         });
         Ok(PythonMatchIterator::new(
@@ -2574,8 +2604,9 @@ impl PythonExpression {
     /// Return an iterator over the replacement of the pattern `self` on `lhs` by `rhs`.
     /// Restrictions on pattern can be supplied through `cond`.
     ///
-    /// The `level_range` specifies the `[min,max)` level at which the pattern is allowed to match.
-    /// The first level is 0 and the level is increased when going one level deeper in the expression tree.
+    /// The `level_range` specifies the `[min,max]` level at which the pattern is allowed to match.
+    /// The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree,
+    /// depending on `level_is_tree_depth`.
     ///
     /// Examples
     /// --------
@@ -2599,12 +2630,14 @@ impl PythonExpression {
         rhs: ConvertibleToPattern,
         cond: Option<PythonPatternRestriction>,
         level_range: Option<(usize, Option<usize>)>,
+        level_is_tree_depth: Option<bool>,
     ) -> PyResult<PythonReplaceIterator> {
         let conditions = cond
             .map(|r| r.condition.clone())
             .unwrap_or(Arc::new(Condition::default()));
         let settings = Arc::new(MatchSettings {
             level_range: level_range.unwrap_or((0, None)),
+            level_is_tree_depth: level_is_tree_depth.unwrap_or(false),
             ..MatchSettings::default()
         });
 
@@ -2625,8 +2658,9 @@ impl PythonExpression {
     /// Replace all atoms matching the pattern `pattern` by the right-hand side `rhs`.
     /// Restrictions on pattern can be supplied through `cond`.
     ///
-    /// The `level_range` specifies the `[min,max)` level at which the pattern is allowed to match.
-    /// The first level is 0 and the level is increased when going one level deeper in the expression tree.
+    /// The `level_range` specifies the `[min,max]` level at which the pattern is allowed to match.
+    /// The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree,
+    /// depending on `level_is_tree_depth`.
     ///
     /// The entire operation can be repeated until there are no more matches using `repeat=True`.
     ///
@@ -2645,6 +2679,7 @@ impl PythonExpression {
         cond: Option<PythonPatternRestriction>,
         non_greedy_wildcards: Option<Vec<PythonExpression>>,
         level_range: Option<(usize, Option<usize>)>,
+        level_is_tree_depth: Option<bool>,
         repeat: Option<bool>,
     ) -> PyResult<PythonExpression> {
         let pattern = &pattern.to_pattern()?.expr;
@@ -2673,6 +2708,9 @@ impl PythonExpression {
         }
         if let Some(level_range) = level_range {
             settings.level_range = level_range;
+        }
+        if let Some(level_is_tree_depth) = level_is_tree_depth {
+            settings.level_is_tree_depth = level_is_tree_depth;
         }
 
         let mut expr_ref = self.expr.as_view();
@@ -3194,7 +3232,7 @@ impl PythonPolynomial {
 
         let e = Token::parse(arg)
             .map_err(exceptions::PyValueError::new_err)?
-            .to_polynomial(&RationalField::new(), &Arc::new(var_map), &var_name_map)
+            .to_polynomial(&Q, &Arc::new(var_map), &var_name_map)
             .map_err(exceptions::PyValueError::new_err)?;
 
         Ok(Self { poly: Arc::new(e) })
@@ -3204,7 +3242,7 @@ impl PythonPolynomial {
     pub fn to_integer_polynomial(&self) -> PyResult<PythonIntegerPolynomial> {
         let mut poly_int = MultivariatePolynomial::new(
             self.poly.nvars,
-            &IntegerRing::new(),
+            &Z,
             Some(self.poly.nterms()),
             self.poly.var_map.clone(),
         );
@@ -3240,7 +3278,7 @@ impl PythonPolynomial {
 
     /// Convert the coefficients of the polynomial to a finite field with prime `prime`.
     pub fn to_finite_field(&self, prime: u32) -> PythonFiniteFieldPolynomial {
-        let f = FiniteField::<u32>::new(prime);
+        let f = Zp::new(prime);
         PythonFiniteFieldPolynomial {
             poly: Arc::new(self.poly.map_coeff(|c| c.to_finite_field(&f), f.clone())),
         }
@@ -3403,7 +3441,7 @@ impl PythonIntegerPolynomial {
 
         let e = Token::parse(arg)
             .map_err(exceptions::PyValueError::new_err)?
-            .to_polynomial(&IntegerRing::new(), &Arc::new(var_map), &var_name_map)
+            .to_polynomial(&Z, &Arc::new(var_map), &var_name_map)
             .map_err(exceptions::PyValueError::new_err)?;
 
         Ok(Self { poly: Arc::new(e) })
@@ -3429,7 +3467,7 @@ impl PythonIntegerPolynomial {
 #[pyclass(name = "FiniteFieldPolynomial")]
 #[derive(Clone)]
 pub struct PythonFiniteFieldPolynomial {
-    pub poly: Arc<MultivariatePolynomial<FiniteField<u32>, u16>>,
+    pub poly: Arc<MultivariatePolynomial<Zp, u16>>,
 }
 
 #[pymethods]
@@ -3462,11 +3500,7 @@ impl PythonFiniteFieldPolynomial {
 
         let e = Token::parse(arg)
             .map_err(exceptions::PyValueError::new_err)?
-            .to_polynomial(
-                &FiniteField::<u32>::new(prime),
-                &Arc::new(var_map),
-                &var_name_map,
-            )
+            .to_polynomial(&Zp::new(prime), &Arc::new(var_map), &var_name_map)
             .map_err(exceptions::PyValueError::new_err)?;
 
         Ok(Self { poly: Arc::new(e) })
@@ -3966,7 +4000,7 @@ impl PythonRationalPolynomial {
             poly: Arc::new(RationalPolynomial::from_num_den(
                 (*num.poly).clone(),
                 (*den.poly).clone(),
-                &IntegerRing::new(),
+                &Z,
                 true,
             )),
         }
@@ -3975,7 +4009,7 @@ impl PythonRationalPolynomial {
     /// Convert the coefficients to finite fields with prime `prime`.
     pub fn to_finite_field(&self, prime: u32) -> PythonFiniteFieldRationalPolynomial {
         PythonFiniteFieldRationalPolynomial {
-            poly: Arc::new(self.poly.to_finite_field(&FiniteField::<u32>::new(prime))),
+            poly: Arc::new(self.poly.to_finite_field(&Zp::new(prime))),
         }
     }
 
@@ -4032,12 +4066,7 @@ macro_rules! generate_rat_parse {
 
                 let e = Token::parse(arg)
                     .map_err(exceptions::PyValueError::new_err)?
-                    .to_rational_polynomial(
-                        &RationalField::new(),
-                        &IntegerRing::new(),
-                        &Arc::new(var_map),
-                        &var_name_map,
-                    )
+                    .to_rational_polynomial(&Q, &Z, &Arc::new(var_map), &var_name_map)
                     .map_err(exceptions::PyValueError::new_err)?;
 
                 Ok(Self { poly: Arc::new(e) })
@@ -4068,7 +4097,7 @@ generate_rat_parse!(PythonRationalPolynomialSmallExponent);
 #[pyclass(name = "FiniteFieldRationalPolynomial")]
 #[derive(Clone)]
 pub struct PythonFiniteFieldRationalPolynomial {
-    pub poly: Arc<RationalPolynomial<FiniteField<u32>, u16>>,
+    pub poly: Arc<RationalPolynomial<Zp, u16>>,
 }
 
 #[pymethods]
@@ -4098,7 +4127,7 @@ impl PythonFiniteFieldRationalPolynomial {
             var_name_map.push(v.into());
         }
 
-        let field = FiniteField::<u32>::new(prime);
+        let field = Zp::new(prime);
         let e = Token::parse(arg)
             .map_err(exceptions::PyValueError::new_err)?
             .to_rational_polynomial(&field, &field, &Arc::new(var_map), &var_name_map)
@@ -4349,10 +4378,9 @@ impl ConvertibleToRationalPolynomial {
             Self::Expression(e) => {
                 let expr = &e.to_expression().expr;
 
-                let poly = expr.as_view().to_rational_polynomial_with_conversion(
-                    &RationalField::new(),
-                    &IntegerRing::new(),
-                );
+                let poly = expr
+                    .as_view()
+                    .to_rational_polynomial_with_conversion(&Q, &Z);
 
                 Ok(PythonRationalPolynomial {
                     poly: Arc::new(poly),
@@ -4387,11 +4415,8 @@ impl PythonMatrix {
         let mut zero = self.matrix.field.zero();
 
         zero.unify_var_map(&mut new_rhs[(0, 0)]);
-        new_self.field = RationalPolynomialField::new(
-            IntegerRing::new(),
-            zero.numerator.nvars,
-            zero.numerator.var_map.clone(),
-        );
+        new_self.field =
+            RationalPolynomialField::new(Z, zero.numerator.nvars, zero.numerator.var_map.clone());
         new_rhs.field = new_self.field.clone();
 
         // now update every element
@@ -4418,7 +4443,7 @@ impl PythonMatrix {
     ) -> (PythonMatrix, PythonRationalPolynomial) {
         if self.matrix.field
             == RationalPolynomialField::new(
-                IntegerRing::new(),
+                Z,
                 rhs.poly.numerator.nvars,
                 rhs.poly.numerator.var_map.clone(),
             )
@@ -4432,11 +4457,8 @@ impl PythonMatrix {
         let mut zero = self.matrix.field.zero();
 
         zero.unify_var_map(&mut new_rhs);
-        new_self.field = RationalPolynomialField::new(
-            IntegerRing::new(),
-            zero.numerator.nvars,
-            zero.numerator.var_map.clone(),
-        );
+        new_self.field =
+            RationalPolynomialField::new(Z, zero.numerator.nvars, zero.numerator.var_map.clone());
 
         // now update every element
         for e in &mut new_self.data {
@@ -4469,7 +4491,7 @@ impl PythonMatrix {
             matrix: Arc::new(Matrix::new(
                 nrows,
                 ncols,
-                RationalPolynomialField::new(IntegerRing::new(), 0, None),
+                RationalPolynomialField::new(Z, 0, None),
             )),
         })
     }
@@ -4486,7 +4508,7 @@ impl PythonMatrix {
         Ok(PythonMatrix {
             matrix: Arc::new(Matrix::identity(
                 nrows,
-                RationalPolynomialField::new(IntegerRing::new(), 0, None),
+                RationalPolynomialField::new(Z, 0, None),
             )),
         })
     }
@@ -4516,11 +4538,8 @@ impl PythonMatrix {
             }
         }
 
-        let field = RationalPolynomialField::new(
-            IntegerRing::new(),
-            first.numerator.nvars,
-            first.numerator.var_map.clone(),
-        );
+        let field =
+            RationalPolynomialField::new(Z, first.numerator.nvars, first.numerator.var_map.clone());
 
         Ok(PythonMatrix {
             matrix: Arc::new(Matrix::eye(&diag, field)),
@@ -4552,11 +4571,8 @@ impl PythonMatrix {
             }
         }
 
-        let field = RationalPolynomialField::new(
-            IntegerRing::new(),
-            first.numerator.nvars,
-            first.numerator.var_map.clone(),
-        );
+        let field =
+            RationalPolynomialField::new(Z, first.numerator.nvars, first.numerator.var_map.clone());
 
         Ok(PythonMatrix {
             matrix: Arc::new(Matrix::new_vec(entries, field)),
@@ -4590,11 +4606,8 @@ impl PythonMatrix {
             }
         }
 
-        let field = RationalPolynomialField::new(
-            IntegerRing::new(),
-            first.numerator.nvars,
-            first.numerator.var_map.clone(),
-        );
+        let field =
+            RationalPolynomialField::new(Z, first.numerator.nvars, first.numerator.var_map.clone());
 
         Ok(PythonMatrix {
             matrix: Arc::new(

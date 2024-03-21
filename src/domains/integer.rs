@@ -15,7 +15,9 @@ use rug::{
 use crate::{printer::PrintOptions, utils};
 
 use super::{
-    finite_field::{FiniteField, FiniteFieldCore, FiniteFieldWorkspace, Mersenne64, ToFiniteField},
+    finite_field::{
+        FiniteField, FiniteFieldCore, FiniteFieldWorkspace, Mersenne64, ToFiniteField, Zp, Zp64,
+    },
     rational::Rational,
     EuclideanDomain, Ring,
 };
@@ -28,7 +30,13 @@ pub const SMALL_PRIMES: [i64; 100] = [
     431, 433, 439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499, 503, 509, 521, 523, 541,
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// The integer ring.
+pub type Z = IntegerRing;
+/// The integer ring.
+pub const Z: IntegerRing = IntegerRing::new();
+
+/// The integer ring.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct IntegerRing;
 
 impl Default for IntegerRing {
@@ -38,7 +46,7 @@ impl Default for IntegerRing {
 }
 
 impl IntegerRing {
-    pub fn new() -> IntegerRing {
+    pub const fn new() -> IntegerRing {
         IntegerRing
     }
 }
@@ -64,6 +72,20 @@ impl From<i64> for Integer {
     }
 }
 
+impl From<i128> for Integer {
+    #[inline]
+    fn from(value: i128) -> Self {
+        Integer::from_double(value)
+    }
+}
+
+impl From<u32> for Integer {
+    #[inline]
+    fn from(value: u32) -> Self {
+        Integer::Natural(value as i64)
+    }
+}
+
 impl From<u64> for Integer {
     #[inline]
     fn from(value: u64) -> Self {
@@ -71,6 +93,17 @@ impl From<u64> for Integer {
             Integer::Natural(value as i64)
         } else {
             Integer::Double(value as i128)
+        }
+    }
+}
+
+impl From<u128> for Integer {
+    #[inline]
+    fn from(value: u128) -> Self {
+        if value <= i128::MAX as u128 {
+            Integer::from_double(value as i128)
+        } else {
+            Integer::Large(value.into())
         }
     }
 }
@@ -110,7 +143,7 @@ impl std::fmt::Debug for Integer {
 }
 
 impl ToFiniteField<u32> for Integer {
-    fn to_finite_field(&self, field: &FiniteField<u32>) -> <FiniteField<u32> as Ring>::Element {
+    fn to_finite_field(&self, field: &Zp) -> <Zp as Ring>::Element {
         match self {
             &Integer::Natural(n) => field.to_element(n.rem_euclid(field.get_prime() as i64) as u32),
             &Integer::Double(n) => field.to_element(n.rem_euclid(field.get_prime() as i128) as u32),
@@ -120,7 +153,7 @@ impl ToFiniteField<u32> for Integer {
 }
 
 impl ToFiniteField<u64> for Integer {
-    fn to_finite_field(&self, field: &FiniteField<u64>) -> <FiniteField<u64> as Ring>::Element {
+    fn to_finite_field(&self, field: &Zp64) -> <Zp64 as Ring>::Element {
         match self {
             &Integer::Natural(n) => {
                 if field.get_prime() > i64::MAX as u64 {
@@ -169,23 +202,17 @@ where
 }
 
 impl FromFiniteField<u32> for Integer {
-    fn from_finite_field(
-        field: &FiniteField<u32>,
-        element: <FiniteField<u32> as Ring>::Element,
-    ) -> Self {
+    fn from_finite_field(field: &Zp, element: <Zp as Ring>::Element) -> Self {
         Integer::Natural(field.from_element(&element) as i64)
     }
 
-    fn from_prime(field: &FiniteField<u32>) -> Self {
+    fn from_prime(field: &Zp) -> Self {
         Integer::Natural(field.get_prime() as i64)
     }
 }
 
 impl FromFiniteField<u64> for Integer {
-    fn from_finite_field(
-        field: &FiniteField<u64>,
-        element: <FiniteField<u64> as Ring>::Element,
-    ) -> Self {
+    fn from_finite_field(field: &Zp64, element: <Zp64 as Ring>::Element) -> Self {
         let r = field.from_element(&element);
         if r <= i64::MAX as u64 {
             Integer::Natural(r as i64)
@@ -194,7 +221,7 @@ impl FromFiniteField<u64> for Integer {
         }
     }
 
-    fn from_prime(field: &FiniteField<u64>) -> Self {
+    fn from_prime(field: &Zp64) -> Self {
         let r = field.get_prime();
         if r <= i64::MAX as u64 {
             Integer::Natural(r as i64)
@@ -511,7 +538,7 @@ impl Integer {
         let mut r1 = self.clone();
 
         while !r1.is_zero() {
-            let (q, r) = IntegerRing::new().quot_rem(&r0, &r1);
+            let (q, r) = Z.quot_rem(&r0, &r1);
             (t1, t0) = (&t0 - &(&q * &t1), t1);
             (r1, r0) = (r, r1);
         }
@@ -1379,7 +1406,7 @@ impl<'a> Rem for &'a Integer {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct MultiPrecisionIntegerRing;
 
 impl Display for MultiPrecisionIntegerRing {

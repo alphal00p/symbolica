@@ -147,14 +147,21 @@ class Expression:
         """
 
     @classmethod
-    def num(_cls, num: int) -> Expression:
-        """Create a new Symbolica number.
+    def num(_cls, num: int | float, max_denom: Optional[int] = None) -> Expression:
+        """Create a new Symbolica number from an int or a float.
+        A floating point number is converted to its rational number equivalent,
+        but it can also be truncated by specifying the maximal denominator value.
 
         Examples
         --------
         >>> e = Expression.num(1) / 2
         >>> print(e)
         1/2
+
+        >>> print(Expression.num(0.33))
+        >>> print(Expression.num(0.33, 5))
+        5944751508129055/18014398509481984
+        1/3
         """
 
     @classmethod
@@ -630,6 +637,11 @@ class Expression:
         >>> print(e.collect(x, key_map=lambda x: var(x), coeff_map=lambda x: coeff(x)))
 
         yields `var(1)*coeff(5)+var(x)*coeff(y+5)+var(x^2)*coeff(1)`.
+
+        Parameters
+        ----------
+        key_map: A function to be applied to the quantity collected in
+        coeff_map: A function to be applied to the coefficient
         """
 
     def coefficient_list(
@@ -702,13 +714,15 @@ class Expression:
         lhs: Transformer | Expression | int,
         cond: Optional[PatternRestriction] = None,
         level_range: Optional[Tuple[int, Optional[int]]] = None,
+        level_is_tree_depth: Optional[bool] = False,
     ) -> MatchIterator:
         """
         Return an iterator over the pattern `self` matching to `lhs`.
         Restrictions on pattern can be supplied through `cond`.
 
-        The `level_range` specifies the `[min,max)` level at which the pattern is allowed to match.
-        The first level is 0 and the level is increased when going one level deeper in the expression tree.
+        The `level_range` specifies the `[min,max]` level at which the pattern is allowed to match.
+        The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree,
+        depending on `level_is_tree_depth`.
 
         Examples
         --------
@@ -727,13 +741,11 @@ class Expression:
         rhs: Transformer | Expression | int,
         cond: Optional[PatternRestriction] = None,
         level_range: Optional[Tuple[int, Optional[int]]] = None,
+        level_is_tree_depth: Optional[bool] = False,
     ) -> ReplaceIterator:
         """
         Return an iterator over the replacement of the pattern `self` on `lhs` by `rhs`.
         Restrictions on pattern can be supplied through `cond`.
-
-        The `level_range` specifies the `[min,max)` level at which the pattern is allowed to match.
-        The first level is 0 and the level is increased when going one level deeper in the expression tree.
 
         Examples
         --------
@@ -751,6 +763,14 @@ class Expression:
         f(1)*f(3)*f(3)
         f(1)*f(2)*f(4)
         ```
+
+        Parameters
+        ----------
+        lhs: The pattern to match.
+        rhs: The right-hand side to replace the matched subexpression with.
+        cond: Conditions on the pattern.
+        level_range: Specifies the `[min,max]` level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
+        level_is_tree_depth: If set to `True`, the level is increased when going one level deeper in the expression tree.
         """
 
     def replace_all(
@@ -760,18 +780,11 @@ class Expression:
         cond: Optional[PatternRestriction] = None,
         non_greedy_wildcards: Optional[Sequence[Expression]] = None,
         level_range: Optional[Tuple[int, Optional[int]]] = None,
+        level_is_tree_depth: Optional[bool] = False,
         repeat: Optional[bool] = False,
     ) -> Expression:
         """
-        Replace all atoms matching the pattern `pattern` by the right-hand side `rhs`.
-        Restrictions on pattern can be supplied through `cond`.
-        The setting `non_greedy_wildcards` can be used to specify
-        wildcards that try to match as little as possible.
-
-        The `level_range` specifies the `[min,max)` level at which the pattern is allowed to match.
-        The first level is 0 and the level is increased when going one level deeper in the expression tree.
-
-        The entire operation can be repeated until there are no more matches using `repeat=True`.
+        Replace all subexpressions matching the pattern `pattern` by the right-hand side `rhs`.
 
         Examples
         --------
@@ -781,6 +794,17 @@ class Expression:
         >>> e = f(3,x)
         >>> r = e.replace_all(f(w1_,w2_), f(w1_ - 1, w2_**2), (w1_ >= 1) & w2_.is_var())
         >>> print(r)
+
+        Parameters
+        ----------
+        self: The expression to match and replace on.
+        pattern: The pattern to match.
+        rhs: The right-hand side to replace the matched subexpression with.
+        cond: Conditions on the pattern.
+        non_greedy_wildcards: Wildcards that try to match as little as possible.
+        level_range: Specifies the `[min,max]` level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
+        level_is_tree_depth: If set to `True`, the level is increased when going one level deeper in the expression tree.
+        repeat: If set to `True`, the entire operation will be repeated until there are no more matches.
         """
 
     @classmethod
@@ -1165,15 +1189,10 @@ class Transformer:
         cond: Optional[PatternRestriction] = None,
         non_greedy_wildcards: Optional[Sequence[Expression]] = None,
         level_range: Optional[Tuple[int, Optional[int]]] = None,
+        level_is_tree_depth: Optional[bool] = False,
     ) -> Transformer:
         """
-        Create a transformer that replaces all patterns matching the left-hand side `self` by the right-hand side `rhs`.
-        Restrictions on pattern can be supplied through `cond`.
-        The settings `non_greedy_wildcards` can be used to specify
-        wildcards that try to match as little as possible.
-
-        The `level_range` specifies the `[min,max)` level at which the pattern is allowed to match.
-        The first level is 0 and the level is increased when going one level deeper in the expression tree.
+        Create a transformer that replaces all subexpressions matching the pattern `pat` by the right-hand side `rhs`.
 
         Examples
         --------
@@ -1183,6 +1202,16 @@ class Transformer:
         >>> e = f(3,x)
         >>> r = e.transform().replace_all(f(w1_,w2_), f(w1_ - 1, w2_**2), (w1_ >= 1) & w2_.is_var())
         >>> print(r)
+
+        Parameters
+        ----------
+        pat: The pattern to match.
+        rhs: The right-hand side to replace the matched subexpression with.
+        cond: Conditions on the pattern.
+        non_greedy_wildcards: Wildcards that try to match as little as possible.
+        level_range: Specifies the `[min,max]` level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
+        level_is_tree_depth: If set to `True`, the level is increased when going one level deeper in the expression tree.
+        repeat: If set to `True`, the entire operation will be repeated until there are no more matches.
         """
 
     def print(
@@ -1862,11 +1891,6 @@ class FiniteFieldPolynomial:
     def groebner_basis(_cls, system: list[FiniteFieldPolynomial], grevlex: bool = True, print_stats: bool = False) -> list[FiniteFieldPolynomial]:
         """Compute the Groebner basis of a polynomial system.
 
-        If `grevlex=True`, reverse graded lexicographical ordering is used,
-        otherwise the ordering is lexicographical.
-
-        If `print_stats=True` intermediate statistics will be printed.
-
         Examples
         --------
         >>> basis = Polynomial.groebner_basis(
@@ -1879,6 +1903,11 @@ class FiniteFieldPolynomial:
         >>> )
         >>> for p in basis:
         >>>     print(p)
+
+        Parameters
+        ----------
+        grevlex: if `True`, reverse graded lexicographical ordering is used, otherwise the ordering is lexicographical.
+        print_stats: if `True`, intermediate statistics will be printed.
         """
 
     def replace(self, x: Expression, v: Polynomial) -> Polynomial:
