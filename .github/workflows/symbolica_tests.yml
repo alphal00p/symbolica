@@ -54,6 +54,12 @@ jobs:
       run: |
         source `./bin/gammaloop -show_venv`
         python -c "import symbolica; print(symbolica.__file__)"
+        pwd
+        ls
+        ls ..
+        ls -all python/gammaloop/dependencies/symbolica
+        ls python/gammaloop/dependencies/venv/lib/python*/*/symbolica/symbolica*.so
+        python -c 'import symbolica; print(symbolica.__file__); from symbolica import set_license_key; set_license_key("GAMMALOOP_USER")'
         ./bin/run_tests.sh python -m "not drawing and not slow"
     - name: Run native rust tests
       working-directory: ./gammaloop
