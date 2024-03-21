@@ -166,6 +166,21 @@ impl LicenseManager {
             return Err(MISSING_LICENSE_ERROR.to_owned());
         };
 
+        /* START OF GAMMALOOP CUSTOM LICENSE MODIFICATION */
+        /* DISCLAIMER
+        |
+        | Allow the user to set the GAMMALOOP_USER environment variable to bypass the license
+        | This is a special measure unique to the gammaLoop fork of Symbolica and is not allowed
+        | to be used outside of the context of gammaLoop.
+        |
+        */
+
+        if key == "GAMMALOOP_USER" {
+            return Ok(());
+        }
+
+        /* END OF GAMMALOOP CUSTOM LICENSE  MODIFICATION */
+
         if key.contains('@') {
             let mut a = key.split('@');
             let f1 = a.next().unwrap();
