@@ -41,18 +41,18 @@ jobs:
     - name: Compile binary
       working-directory: ./gammaloop
       run: |
-        ./bin/compile_bin.sh --release
+        ./bin/compile_bin.sh
     - name: Compile library
       working-directory: ./gammaloop
       run: |
-        ./bin/compile_lib.sh --release
+        ./bin/compile_lib.sh
     - name: Run python tests
       working-directory: ./gammaloop
       run: |
-        source `./bin/gammaloop -show_venv`
+        source `./bin/gammaloop -venv`
         ./bin/run_tests.sh python -m "not drawing and not slow"
     - name: Run native rust tests
       working-directory: ./gammaloop
       run: |
-        source `./bin/gammaloop -show_venv`
+        source `./bin/gammaloop -venv`
         ./bin/run_tests.sh rust
