@@ -23,7 +23,6 @@ jobs:
     - uses: actions/checkout@v3
       with:
         repository: alphal00p/gammaloop
-        ref: madsymbolic
         path: ./gammaloop
     - name: Set up Python 3.11
       uses: actions/setup-python@v3
