@@ -46,6 +46,7 @@ fn main() {
     let print_opt = PrintOptions {
         terms_on_new_line: false,
         color_top_level_sum: false,
+        color: false,
         color_builtin_functions: false,
         print_finite_field: false,
         symmetric_representation_for_finite_field: false,

@@ -19,6 +19,7 @@ use crate::{
 #[derive(Debug, Copy, Clone)]
 pub struct PrintOptions {
     pub terms_on_new_line: bool,
+    pub color: bool,
     pub color_top_level_sum: bool,
     pub color_builtin_functions: bool,
     pub print_finite_field: bool,
@@ -37,6 +38,7 @@ impl PrintOptions {
         Self {
             terms_on_new_line: false,
             color_top_level_sum: false,
+            color : false,
             color_builtin_functions: false,
             print_finite_field: true,
             symmetric_representation_for_finite_field: false,
@@ -53,6 +55,7 @@ impl PrintOptions {
     pub fn latex() -> PrintOptions {
         Self {
             terms_on_new_line: false,
+            color: false,
             color_top_level_sum: false,
             color_builtin_functions: false,
             print_finite_field: true,
@@ -72,6 +75,7 @@ impl Default for PrintOptions {
         Self {
             terms_on_new_line: false,
             color_top_level_sum: true,
+            color: true,
             color_builtin_functions: true,
             print_finite_field: true,
             symmetric_representation_for_finite_field: false,
@@ -199,7 +203,7 @@ impl<'a> FormattedPrintVar for VarView<'a> {
         print_state: PrintState,
     ) -> fmt::Result {
         if print_state.explicit_sign {
-            if print_state.level == 1 && opts.color_top_level_sum {
+            if print_state.level == 1 && opts.color_top_level_sum && opts.color{
                 f.write_fmt(format_args!("{}", "+".yellow()))?;
             } else {
                 f.write_char('+')?;
@@ -216,9 +220,9 @@ impl<'a> FormattedPrintVar for VarView<'a> {
                 State::I => f.write_char('i'),
                 _ => f.write_str(name),
             }
-        } else if name.ends_with('_') {
+        } else if name.ends_with('_')&& opts.color {
             f.write_fmt(format_args!("{}", name.cyan().italic()))
-        } else if opts.color_builtin_functions && State::is_builtin(id) {
+        } else if opts.color_builtin_functions && State::is_builtin(id)&& opts.color {
             f.write_fmt(format_args!("{}", name.purple()))
         } else {
             f.write_str(name)
@@ -284,7 +288,7 @@ impl<'a> FormattedPrintNum for NumView<'a> {
         };
 
         if is_negative {
-            if print_state.level == 1 && opts.color_top_level_sum {
+            if print_state.level == 1 && opts.color_top_level_sum && opts.color{
                 f.write_fmt(format_args!("{}", "-".yellow()))?;
             } else if print_state.superscript {
                 f.write_char('⁻')?;
@@ -292,7 +296,7 @@ impl<'a> FormattedPrintNum for NumView<'a> {
                 f.write_char('-')?;
             }
         } else if print_state.explicit_sign {
-            if print_state.level == 1 && opts.color_top_level_sum {
+            if print_state.level == 1 && opts.color_top_level_sum&& opts.color {
                 f.write_fmt(format_args!("{}", "+".yellow()))?;
             } else {
                 f.write_char('+')?;
@@ -378,7 +382,7 @@ impl<'a> FormattedPrintMul for MulView<'a> {
         if let Some(AtomView::Num(n)) = self.iter().last() {
             // write -1*x as -x
             if n.get_coeff_view() == CoefficientView::Natural(-1, 1) {
-                if print_state.level == 1 && opts.color_top_level_sum {
+                if print_state.level == 1 && opts.color_top_level_sum&& opts.color {
                     f.write_fmt(format_args!("{}", "-".yellow()))?;
                 } else {
                     f.write_char('-')?;
@@ -392,7 +396,7 @@ impl<'a> FormattedPrintMul for MulView<'a> {
 
             skip_num = true;
         } else if print_state.explicit_sign {
-            if print_state.level == 1 && opts.color_top_level_sum {
+            if print_state.level == 1 && opts.color_top_level_sum && opts.color{
                 f.write_fmt(format_args!("{}", "+".yellow()))?;
             } else {
                 f.write_char('+')?;
@@ -443,7 +447,7 @@ impl<'a> FormattedPrintFn for FunView<'a> {
         mut print_state: PrintState,
     ) -> fmt::Result {
         if print_state.explicit_sign {
-            if print_state.level == 1 && opts.color_top_level_sum {
+            if print_state.level == 1 && opts.color_top_level_sum && opts.color{
                 f.write_fmt(format_args!("{}", "+".yellow()))?;
             } else {
                 f.write_char('+')?;
@@ -460,11 +464,11 @@ impl<'a> FormattedPrintFn for FunView<'a> {
                 f.write_fmt(format_args!("{}\\!\\left(", name))?;
             }
         } else {
-            if name.ends_with('_') {
+            if name.ends_with('_') && opts.color{
                 f.write_fmt(format_args!("{}", name.cyan().italic()))?;
             } else {
                 // check if the function name is built in
-                if opts.color_builtin_functions && State::is_builtin(id) {
+                if opts.color_builtin_functions && State::is_builtin(id)&& opts.color {
                     f.write_fmt(format_args!("{}", name.purple()))?;
                 } else {
                     f.write_str(name)?;
@@ -512,7 +516,7 @@ impl<'a> FormattedPrintPow for PowView<'a> {
         mut print_state: PrintState,
     ) -> fmt::Result {
         if print_state.explicit_sign {
-            if print_state.level == 1 && opts.color_top_level_sum {
+            if print_state.level == 1 && opts.color_top_level_sum && opts.color{
                 f.write_fmt(format_args!("{}", "+".yellow()))?;
             } else {
                 f.write_char('+')?;

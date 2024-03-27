@@ -160,6 +160,7 @@ unsafe extern "C" fn simplify(
         terms_on_new_line: false,
         color_top_level_sum: false,
         color_builtin_functions: false,
+        color: false,
         print_finite_field: false,
         symmetric_representation_for_finite_field: false,
         explicit_rational_polynomial,
@@ -295,6 +296,7 @@ unsafe extern "C" fn simplify_factorized(
     let opts = PrintOptions {
         terms_on_new_line: false,
         color_top_level_sum: false,
+        color: false,
         color_builtin_functions: false,
         print_finite_field: false,
         symmetric_representation_for_finite_field: false,
