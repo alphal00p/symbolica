@@ -2433,6 +2433,7 @@ impl PythonExpression {
     }
 
     /// Convert the expression to a polynomial, optionally, with the variables and the ordering specified in `vars`.
+    /// All non-polynomial elements will be converted to new independent variables.
     pub fn to_polynomial(&self, vars: Option<Vec<PythonExpression>>) -> PyResult<PythonPolynomial> {
         let mut var_map = vec![];
         if let Some(vm) = vars {
@@ -2455,26 +2456,16 @@ impl PythonExpression {
             Some(Arc::new(var_map))
         };
 
-        self.expr
-            .as_view()
-            .to_polynomial(&Q, var_map.as_ref())
-            .map(|x| PythonPolynomial { poly: Arc::new(x) })
-            .map_err(|e| {
-                exceptions::PyValueError::new_err(format!("Could not convert to polynomial: {}", e))
-            })
+        Ok(PythonPolynomial {
+            poly: Arc::new(self.expr.to_polynomial(&Q, var_map)),
+        })
     }
 
-    /// Convert the expression to a polynomial, converting all non-polynomial elements to
-    /// new independent variables.
-    pub fn to_polynomial_with_conversion(&self) -> PythonPolynomial {
-        PythonPolynomial {
-            poly: Arc::new(self.expr.as_view().to_polynomial_with_conversion(&Q)),
-        }
-    }
-
-    /// Convert the expression to a rational polynomial, optionally, with the variables and the ordering specified in `vars`.
+    /// Convert the expression to a rational polynomial, optionally, with the variable ordering specified in `vars`.
     /// The latter is useful if it is known in advance that more variables may be added in the future to the
     /// rational polynomial through composition with other rational polynomials.
+    ///
+    /// All non-rational polynomial parts will automatically be converted to new independent variables.
     ///
     /// Examples
     /// --------
@@ -2505,13 +2496,9 @@ impl PythonExpression {
             Some(Arc::new(var_map))
         };
 
-        self.expr
-            .as_view()
-            .to_rational_polynomial(&Q, &Z, var_map.as_ref())
-            .map(|x| PythonRationalPolynomial { poly: Arc::new(x) })
-            .map_err(|e| {
-                exceptions::PyValueError::new_err(format!("Could not convert to polynomial: {}", e))
-            })
+        Ok(PythonRationalPolynomial {
+            poly: Arc::new(self.expr.to_rational_polynomial(&Q, &Z, var_map)),
+        })
     }
 
     /// Similar to [PythonExpression::to_rational_polynomial()], but the power of each variable limited to 255.
@@ -2540,24 +2527,9 @@ impl PythonExpression {
             Some(Arc::new(var_map))
         };
 
-        self.expr
-            .as_view()
-            .to_rational_polynomial(&Q, &Z, var_map.as_ref())
-            .map(|x| PythonRationalPolynomialSmallExponent { poly: Arc::new(x) })
-            .map_err(|e| {
-                exceptions::PyValueError::new_err(format!("Could not convert to polynomial: {}", e))
-            })
-    }
-
-    /// Convert the expression to a rational polynomial, converting all non-polynomial elements to
-    /// new independent variables.
-    pub fn to_rational_polynomial_with_conversion(&self) -> PyResult<PythonRationalPolynomial> {
-        let p = self
-            .expr
-            .as_view()
-            .to_rational_polynomial_with_conversion(&Q, &Z);
-
-        Ok(PythonRationalPolynomial { poly: Arc::new(p) })
+        Ok(PythonRationalPolynomialSmallExponent {
+            poly: Arc::new(self.expr.to_rational_polynomial(&Q, &Z, var_map)),
+        })
     }
 
     /// Return an iterator over the pattern `self` matching to `lhs`.
@@ -3240,12 +3212,8 @@ impl PythonPolynomial {
 
     /// Convert the polynomial to a polynomial with integer coefficients, if possible.
     pub fn to_integer_polynomial(&self) -> PyResult<PythonIntegerPolynomial> {
-        let mut poly_int = MultivariatePolynomial::new(
-            self.poly.nvars,
-            &Z,
-            Some(self.poly.nterms()),
-            self.poly.var_map.clone(),
-        );
+        let mut poly_int =
+            MultivariatePolynomial::new(&Z, Some(self.poly.nterms()), self.poly.variables.clone());
 
         let mut new_exponent = SmallVec::<[u8; 5]>::new();
 
@@ -3675,15 +3643,7 @@ macro_rules! generate_methods {
             pub fn get_var_list(&self) -> PyResult<Vec<PythonExpression>> {
                 let mut var_list = vec![];
 
-                let vars = self
-                    .poly
-                    .var_map
-                    .as_ref()
-                    .ok_or(exceptions::PyValueError::new_err(format!(
-                        "Variable map missing",
-                    )))?;
-
-                for x in vars.as_ref() {
+                for x in self.poly.get_vars_ref() {
                     match x {
                         Variable::Symbol(x) => {
                             var_list.push(PythonExpression {
@@ -3716,14 +3676,14 @@ macro_rules! generate_methods {
 
             /// Add two polynomials `self and `rhs`, returning the result.
             pub fn __add__(&self, rhs: Self) -> Self {
-                if self.poly.get_var_map() == rhs.poly.get_var_map() {
+                if self.poly.get_vars_ref() == rhs.poly.get_vars_ref() {
                     Self {
                         poly: Arc::new((*self.poly).clone() + (*rhs.poly).clone()),
                     }
                 } else {
                     let mut new_self = (*self.poly).clone();
                     let mut new_rhs = (*rhs.poly).clone();
-                    new_self.unify_var_map(&mut new_rhs);
+                    new_self.unify_variables(&mut new_rhs);
                     Self {
                         poly: Arc::new(new_self + new_rhs),
                     }
@@ -3737,14 +3697,14 @@ macro_rules! generate_methods {
 
             /// Multiply two polynomials `self and `rhs`, returning the result.
             pub fn __mul__(&self, rhs: Self) -> Self {
-                if self.poly.get_var_map() == rhs.poly.get_var_map() {
+                if self.poly.get_vars_ref() == rhs.poly.get_vars_ref() {
                     Self {
                         poly: Arc::new(&*self.poly * &*rhs.poly),
                     }
                 } else {
                     let mut new_self = (*self.poly).clone();
                     let mut new_rhs = (*rhs.poly).clone();
-                    new_self.unify_var_map(&mut new_rhs);
+                    new_self.unify_variables(&mut new_rhs);
                     Self {
                         poly: Arc::new(new_self * &new_rhs),
                     }
@@ -3753,12 +3713,12 @@ macro_rules! generate_methods {
 
             /// Divide the polynomial `self` by `rhs` if possible, returning the result.
             pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
-                let (q, r) = if self.poly.get_var_map() == rhs.poly.get_var_map() {
+                let (q, r) = if self.poly.get_vars_ref() == rhs.poly.get_vars_ref() {
                     self.poly.quot_rem(&rhs.poly, false)
                 } else {
                     let mut new_self = (*self.poly).clone();
                     let mut new_rhs = (*rhs.poly).clone();
-                    new_self.unify_var_map(&mut new_rhs);
+                    new_self.unify_variables(&mut new_rhs);
 
                     new_self.quot_rem(&new_rhs, false)
                 };
@@ -3775,14 +3735,14 @@ macro_rules! generate_methods {
 
             /// Divide `self` by `rhs`, returning the quotient and remainder.
             pub fn quot_rem(&self, rhs: Self) -> (Self, Self) {
-                if self.poly.get_var_map() == rhs.poly.get_var_map() {
+                if self.poly.get_vars_ref() == rhs.poly.get_vars_ref() {
                     let (q, r) = self.poly.quot_rem(&rhs.poly, false);
 
                     (Self { poly: Arc::new(q) }, Self { poly: Arc::new(r) })
                 } else {
                     let mut new_self = (*self.poly).clone();
                     let mut new_rhs = (*rhs.poly).clone();
-                    new_self.unify_var_map(&mut new_rhs);
+                    new_self.unify_variables(&mut new_rhs);
 
                     let (q, r) = new_self.quot_rem(&new_rhs, false);
 
@@ -3799,14 +3759,14 @@ macro_rules! generate_methods {
 
             /// Compute the greatest common divisor (GCD) of two polynomials.
             pub fn gcd(&self, rhs: Self) -> Self {
-                if self.poly.get_var_map() == rhs.poly.get_var_map() {
+                if self.poly.get_vars_ref() == rhs.poly.get_vars_ref() {
                     Self {
                         poly: Arc::new(self.poly.gcd(&rhs.poly)),
                     }
                 } else {
                     let mut new_self = (*self.poly).clone();
                     let mut new_rhs = (*rhs.poly).clone();
-                    new_self.unify_var_map(&mut new_rhs);
+                    new_self.unify_variables(&mut new_rhs);
                     Self {
                         poly: Arc::new(new_self.gcd(&new_rhs)),
                     }
@@ -3870,9 +3830,7 @@ macro_rules! generate_methods {
                     }
                 };
 
-                let x = self.poly.get_var_map().as_ref().ok_or(
-                    exceptions::PyValueError::new_err("Variable map missing"),
-                )?.iter().position(|x| match x {
+                let x = self.poly.get_vars_ref().iter().position(|x| match x {
                     Variable::Symbol(y) => *y == id,
                     _ => false,
                 }).ok_or(exceptions::PyValueError::new_err(format!(
@@ -3917,9 +3875,7 @@ macro_rules! generate_methods {
                     }
                 };
 
-                let x = self.poly.get_var_map().as_ref().ok_or(
-                    exceptions::PyValueError::new_err("Variable map missing"),
-                )?.iter().position(|x| match x {
+                let x = self.poly.get_vars_ref().iter().position(|x| match x {
                     Variable::Symbol(y) => *y == id,
                     _ => false,
                 }).ok_or(exceptions::PyValueError::new_err(format!(
@@ -3953,9 +3909,7 @@ macro_rules! generate_methods {
                     }
                 };
 
-                let x = self.poly.get_var_map().as_ref().ok_or(
-                    exceptions::PyValueError::new_err("Variable map missing"),
-                )?.iter().position(|x| match x {
+                let x = self.poly.get_vars_ref().iter().position(|x| match x {
                     Variable::Symbol(y) => *y == id,
                     _ => false,
                 }).ok_or(exceptions::PyValueError::new_err(format!(
@@ -3963,14 +3917,14 @@ macro_rules! generate_methods {
                     x.__str__()?
                 )))?;
 
-                if self.poly.get_var_map() == v.poly.get_var_map() {
+                if self.poly.get_vars_ref() == v.poly.get_vars_ref() {
                     Ok(Self {
                         poly: Arc::new(self.poly.replace_with_poly(x, &v.poly))
                     })
                 } else {
                     let mut new_self = (*self.poly).clone();
                     let mut new_rhs = (*v.poly).clone();
-                    new_self.unify_var_map(&mut new_rhs);
+                    new_self.unify_variables(&mut new_rhs);
                     Ok(Self {
                         poly: Arc::new(new_self.replace_with_poly(x, &new_rhs))
                     })
@@ -4177,11 +4131,7 @@ macro_rules! generate_rat_methods {
             pub fn get_var_list(&self) -> PyResult<Vec<PythonExpression>> {
                 let mut var_list = vec![];
 
-                let vars = self.poly.numerator.var_map.as_ref().ok_or(
-                    exceptions::PyValueError::new_err(format!("Variable map missing",)),
-                )?;
-
-                for x in vars.as_ref() {
+                for x in self.poly.get_variables().iter() {
                     match x {
                         Variable::Symbol(x) => {
                             var_list.push(PythonExpression {
@@ -4237,14 +4187,14 @@ macro_rules! generate_rat_methods {
 
             /// Add two rational polynomials `self and `rhs`, returning the result.
             pub fn __add__(&self, rhs: Self) -> Self {
-                if self.poly.get_var_map() == rhs.poly.get_var_map() {
+                if self.poly.get_variables() == rhs.poly.get_variables() {
                     Self {
                         poly: Arc::new(&*self.poly + &*rhs.poly),
                     }
                 } else {
                     let mut new_self = (*self.poly).clone();
                     let mut new_rhs = (*rhs.poly).clone();
-                    new_self.unify_var_map(&mut new_rhs);
+                    new_self.unify_variables(&mut new_rhs);
                     Self {
                         poly: Arc::new(&new_self + &new_rhs),
                     }
@@ -4253,14 +4203,14 @@ macro_rules! generate_rat_methods {
 
             /// Subtract rational polynomials `rhs` from `self`, returning the result.
             pub fn __sub__(&self, rhs: Self) -> Self {
-                if self.poly.get_var_map() == rhs.poly.get_var_map() {
+                if self.poly.get_variables() == rhs.poly.get_variables() {
                     Self {
                         poly: Arc::new(&*self.poly - &*rhs.poly),
                     }
                 } else {
                     let mut new_self = (*self.poly).clone();
                     let mut new_rhs = (*rhs.poly).clone();
-                    new_self.unify_var_map(&mut new_rhs);
+                    new_self.unify_variables(&mut new_rhs);
                     Self {
                         poly: Arc::new(&new_self - &new_rhs),
                     }
@@ -4269,14 +4219,14 @@ macro_rules! generate_rat_methods {
 
             /// Multiply two rational polynomials `self and `rhs`, returning the result.
             pub fn __mul__(&self, rhs: Self) -> Self {
-                if self.poly.get_var_map() == rhs.poly.get_var_map() {
+                if self.poly.get_variables() == rhs.poly.get_variables() {
                     Self {
                         poly: Arc::new(&*self.poly * &*rhs.poly),
                     }
                 } else {
                     let mut new_self = (*self.poly).clone();
                     let mut new_rhs = (*rhs.poly).clone();
-                    new_self.unify_var_map(&mut new_rhs);
+                    new_self.unify_variables(&mut new_rhs);
                     Self {
                         poly: Arc::new(&new_self * &new_rhs),
                     }
@@ -4285,14 +4235,14 @@ macro_rules! generate_rat_methods {
 
             /// Divide the rational polynomial `self` by `rhs` if possible, returning the result.
             pub fn __truediv__(&self, rhs: Self) -> Self {
-                if self.poly.get_var_map() == rhs.poly.get_var_map() {
+                if self.poly.get_variables() == rhs.poly.get_variables() {
                     Self {
                         poly: Arc::new(&*self.poly * &*rhs.poly),
                     }
                 } else {
                     let mut new_self = (*self.poly).clone();
                     let mut new_rhs = (*rhs.poly).clone();
-                    new_self.unify_var_map(&mut new_rhs);
+                    new_self.unify_variables(&mut new_rhs);
                     Self {
                         poly: Arc::new(&new_self / &new_rhs),
                     }
@@ -4308,14 +4258,14 @@ macro_rules! generate_rat_methods {
 
             /// Compute the greatest common divisor (GCD) of two rational polynomials.
             pub fn gcd(&self, rhs: Self) -> Self {
-                if self.poly.get_var_map() == rhs.poly.get_var_map() {
+                if self.poly.get_variables() == rhs.poly.get_variables() {
                     Self {
                         poly: Arc::new(self.poly.gcd(&rhs.poly)),
                     }
                 } else {
                     let mut new_self = (*self.poly).clone();
                     let mut new_rhs = (*rhs.poly).clone();
-                    new_self.unify_var_map(&mut new_rhs);
+                    new_self.unify_variables(&mut new_rhs);
                     Self {
                         poly: Arc::new(new_self.gcd(&new_rhs)),
                     }
@@ -4344,9 +4294,7 @@ macro_rules! generate_rat_methods {
                     }
                 };
 
-                let x = self.poly.get_var_map().as_ref().ok_or(
-                    exceptions::PyValueError::new_err("Variable map missing"),
-                )?.iter().position(|x| match x {
+                let x = self.poly.get_variables().iter().position(|x| match x {
                     Variable::Symbol(y) => *y == id,
                     _ => false,
                 }).ok_or(exceptions::PyValueError::new_err(format!(
@@ -4378,9 +4326,7 @@ impl ConvertibleToRationalPolynomial {
             Self::Expression(e) => {
                 let expr = &e.to_expression().expr;
 
-                let poly = expr
-                    .as_view()
-                    .to_rational_polynomial_with_conversion(&Q, &Z);
+                let poly = expr.to_rational_polynomial(&Q, &Z, None);
 
                 Ok(PythonRationalPolynomial {
                     poly: Arc::new(poly),
@@ -4414,17 +4360,16 @@ impl PythonMatrix {
 
         let mut zero = self.matrix.field.zero();
 
-        zero.unify_var_map(&mut new_rhs[(0, 0)]);
-        new_self.field =
-            RationalPolynomialField::new(Z, zero.numerator.nvars, zero.numerator.var_map.clone());
+        zero.unify_variables(&mut new_rhs[(0, 0)]);
+        new_self.field = RationalPolynomialField::new(Z, zero.numerator.get_vars());
         new_rhs.field = new_self.field.clone();
 
         // now update every element
         for e in &mut new_self.data {
-            zero.unify_var_map(e);
+            zero.unify_variables(e);
         }
         for e in &mut new_rhs.data {
-            zero.unify_var_map(e);
+            zero.unify_variables(e);
         }
 
         (
@@ -4441,13 +4386,7 @@ impl PythonMatrix {
         &self,
         rhs: &PythonRationalPolynomial,
     ) -> (PythonMatrix, PythonRationalPolynomial) {
-        if self.matrix.field
-            == RationalPolynomialField::new(
-                Z,
-                rhs.poly.numerator.nvars,
-                rhs.poly.numerator.var_map.clone(),
-            )
-        {
+        if self.matrix.field == RationalPolynomialField::new(Z, rhs.poly.numerator.get_vars()) {
             return (self.clone(), rhs.clone());
         }
 
@@ -4456,13 +4395,12 @@ impl PythonMatrix {
 
         let mut zero = self.matrix.field.zero();
 
-        zero.unify_var_map(&mut new_rhs);
-        new_self.field =
-            RationalPolynomialField::new(Z, zero.numerator.nvars, zero.numerator.var_map.clone());
+        zero.unify_variables(&mut new_rhs);
+        new_self.field = RationalPolynomialField::new(Z, zero.numerator.get_vars());
 
         // now update every element
         for e in &mut new_self.data {
-            zero.unify_var_map(e);
+            zero.unify_variables(e);
         }
 
         (
@@ -4491,7 +4429,7 @@ impl PythonMatrix {
             matrix: Arc::new(Matrix::new(
                 nrows,
                 ncols,
-                RationalPolynomialField::new(Z, 0, None),
+                RationalPolynomialField::new(Z, Arc::new(vec![])),
             )),
         })
     }
@@ -4508,7 +4446,7 @@ impl PythonMatrix {
         Ok(PythonMatrix {
             matrix: Arc::new(Matrix::identity(
                 nrows,
-                RationalPolynomialField::new(Z, 0, None),
+                RationalPolynomialField::new(Z, Arc::new(vec![])),
             )),
         })
     }
@@ -4534,12 +4472,11 @@ impl PythonMatrix {
         let (first, rest) = diag.split_first_mut().unwrap();
         for _ in 0..2 {
             for x in &mut *rest {
-                first.unify_var_map(x);
+                first.unify_variables(x);
             }
         }
 
-        let field =
-            RationalPolynomialField::new(Z, first.numerator.nvars, first.numerator.var_map.clone());
+        let field = RationalPolynomialField::new(Z, first.numerator.get_vars());
 
         Ok(PythonMatrix {
             matrix: Arc::new(Matrix::eye(&diag, field)),
@@ -4567,12 +4504,11 @@ impl PythonMatrix {
         let (first, rest) = entries.split_first_mut().unwrap();
         for _ in 0..2 {
             for x in &mut *rest {
-                first.unify_var_map(x);
+                first.unify_variables(x);
             }
         }
 
-        let field =
-            RationalPolynomialField::new(Z, first.numerator.nvars, first.numerator.var_map.clone());
+        let field = RationalPolynomialField::new(Z, first.numerator.get_vars());
 
         Ok(PythonMatrix {
             matrix: Arc::new(Matrix::new_vec(entries, field)),
@@ -4602,12 +4538,11 @@ impl PythonMatrix {
         let (first, rest) = entries.split_first_mut().unwrap();
         for _ in 0..2 {
             for x in &mut *rest {
-                first.unify_var_map(x);
+                first.unify_variables(x);
             }
         }
 
-        let field =
-            RationalPolynomialField::new(Z, first.numerator.nvars, first.numerator.var_map.clone());
+        let field = RationalPolynomialField::new(Z, first.numerator.get_vars());
 
         Ok(PythonMatrix {
             matrix: Arc::new(

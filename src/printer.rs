@@ -217,9 +217,9 @@ impl<'a> FormattedPrintVar for VarView<'a> {
                 _ => f.write_str(name),
             }
         } else if name.ends_with('_') {
-            f.write_fmt(format_args!("{}", name.as_str().cyan().italic()))
+            f.write_fmt(format_args!("{}", name.cyan().italic()))
         } else if opts.color_builtin_functions && State::is_builtin(id) {
-            f.write_fmt(format_args!("{}", name.as_str().purple()))
+            f.write_fmt(format_args!("{}", name.purple()))
         } else {
             f.write_str(name)
         }
@@ -461,11 +461,11 @@ impl<'a> FormattedPrintFn for FunView<'a> {
             }
         } else {
             if name.ends_with('_') {
-                f.write_fmt(format_args!("{}", name.as_str().cyan().italic()))?;
+                f.write_fmt(format_args!("{}", name.cyan().italic()))?;
             } else {
                 // check if the function name is built in
                 if opts.color_builtin_functions && State::is_builtin(id) {
-                    f.write_fmt(format_args!("{}", name.as_str().purple()))?;
+                    f.write_fmt(format_args!("{}", name.purple()))?;
                 } else {
                     f.write_str(name)?;
                 }
@@ -1127,10 +1127,13 @@ impl<'a, F: Ring + Display, E: Exponent, O: MonomialOrder> Display
             f.write_char('+')?;
         }
 
-        let var_map: Vec<String> = match self.poly.var_map.as_ref() {
-            Some(v) => v.iter().map(|v| v.to_string()).collect(),
-            None => (0..self.poly.nvars).map(|i| format!("x{}", i)).collect(),
-        };
+        let var_map: Vec<String> = self
+            .poly
+            .variables
+            .as_ref()
+            .iter()
+            .map(|v| v.to_string())
+            .collect();
 
         let mut is_first_term = true;
         for monomial in self.poly {
