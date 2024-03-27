@@ -804,6 +804,7 @@ impl PythonPattern {
             self,
             Transformer::Print(PrintOptions {
                 terms_on_new_line,
+                color: true,
                 color_top_level_sum,
                 color_builtin_functions,
                 print_finite_field,
@@ -1460,6 +1461,7 @@ impl PythonExpression {
                     terms_on_new_line,
                     color_top_level_sum,
                     color_builtin_functions,
+                    color:true,
                     print_finite_field,
                     symmetric_representation_for_finite_field,
                     explicit_rational_polynomial,
@@ -3598,6 +3600,7 @@ macro_rules! generate_methods {
                             PrintOptions {
                                 terms_on_new_line,
                                 color_top_level_sum,
+                                color: true,
                                 color_builtin_functions,
                                 print_finite_field,
                                 symmetric_representation_for_finite_field,
