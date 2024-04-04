@@ -804,7 +804,6 @@ impl PythonPattern {
             self,
             Transformer::Print(PrintOptions {
                 terms_on_new_line,
-                color: true,
                 color_top_level_sum,
                 color_builtin_symbols,
                 print_finite_field,
