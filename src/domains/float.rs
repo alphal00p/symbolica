@@ -520,6 +520,14 @@ impl<T: Real> Complex<T> {
     }
 
     #[inline]
+    pub fn i() -> Complex<T> {
+        Complex {
+            re: T::zero(),
+            im: T::one(),
+        }
+    }
+
+    #[inline]
     pub fn norm_squared(&self) -> T {
         self.re * self.re + self.im * self.im
     }
@@ -806,21 +814,26 @@ impl<T: Real> NumericalFloatLike for Complex<T> {
     }
 }
 
+/// Following the same conventions and formulas as num::Complex.
 impl<T: Real> Real for Complex<T> {
+    #[inline]
     fn sqrt(&self) -> Self {
         let (r, phi) = self.to_polar_coordinates();
         Complex::from_polar_coordinates(r.sqrt(), phi / T::from_usize(2))
     }
 
+    #[inline]
     fn log(&self) -> Self {
         Complex::new(self.norm().re.log(), self.arg())
     }
 
+    #[inline]
     fn exp(&self) -> Self {
         let r = self.re.exp();
         Complex::new(r * self.im.cos(), r * self.im.sin())
     }
 
+    #[inline]
     fn sin(&self) -> Self {
         Complex::new(
             self.re.sin() * self.im.cosh(),
@@ -828,6 +841,7 @@ impl<T: Real> Real for Complex<T> {
         )
     }
 
+    #[inline]
     fn cos(&self) -> Self {
         Complex::new(
             self.re.cos() * self.im.cosh(),
@@ -835,22 +849,37 @@ impl<T: Real> Real for Complex<T> {
         )
     }
 
+    #[inline]
     fn tan(&self) -> Self {
-        todo!("tan on complex numbers are not implemented yet")
+        let (r, i) = (self.re + self.re, self.im + self.im);
+        let m = r.cos() + i.cosh();
+        Self::new(r.sin() / m, i.sinh() / m)
     }
 
+    #[inline]
     fn asin(&self) -> Self {
-        todo!("asin on complex numbers are not implemented yet")
+        let i = Self::i();
+        -i * ((Self::one() - self.clone() * self).sqrt() + i * self).log()
     }
 
+    #[inline]
     fn acos(&self) -> Self {
-        todo!("asin on complex numbers are not implemented yet")
+        let i = Self::i();
+        -i * (i * (Self::one() - self.clone() * self).sqrt() + self).log()
     }
 
-    fn atan2(&self, _x: &Self) -> Self {
-        todo!("Atan2 on complex numbers are not implemented yet")
+    #[inline]
+    fn atan2(&self, x: &Self) -> Self {
+        // TODO: pick proper branch
+        let r = self.clone() / x;
+        let i = Self::i();
+        let one = Self::one();
+        let two = one + one;
+        // TODO: add edge cases
+        ((one + i * r).log() - (one - i * r).log()) / (two * i)
     }
 
+    #[inline]
     fn sinh(&self) -> Self {
         Complex::new(
             self.re.sinh() * self.im.cos(),
@@ -858,6 +887,7 @@ impl<T: Real> Real for Complex<T> {
         )
     }
 
+    #[inline]
     fn cosh(&self) -> Self {
         Complex::new(
             self.re.cosh() * self.im.cos(),
@@ -865,24 +895,44 @@ impl<T: Real> Real for Complex<T> {
         )
     }
 
+    #[inline]
     fn tanh(&self) -> Self {
-        todo!("tanh on complex numbers are not implemented yet");
+        let (two_re, two_im) = (self.re + self.re, self.im + self.im);
+        let m = two_re.cosh() + two_im.cos();
+        Self::new(two_re.sinh() / m, two_im.sin() / m)
     }
 
+    #[inline]
     fn asinh(&self) -> Self {
-        todo!("asinh on complex numbers are not implemented yet");
+        let one = Self::one();
+        (self.clone() + (one + self.clone() * self).sqrt()).log()
     }
 
+    #[inline]
     fn acosh(&self) -> Self {
-        todo!("acosh on complex numbers are not implemented yet");
+        let one = Self::one();
+        let two = one + one;
+        two * (((self.clone() + one) / two).sqrt() + ((self.clone() - one) / two).sqrt()).log()
     }
 
+    #[inline]
     fn atanh(&self) -> Self {
-        todo!("atanh on complex numbers are not implemented yet");
+        let one = Self::one();
+        let two = one + one;
+        // TODO: add edge cases
+        ((one + self).log() - (one - self).log()) / two
     }
 
-    fn powf(&self, _e: Self) -> Self {
-        todo!("Float exponentiation on complex numbers are not implemented yet")
+    #[inline]
+    fn powf(&self, e: Self) -> Self {
+        if e.re == T::zero() && e.im == T::zero() {
+            return Complex::one();
+        } else if e.im == T::zero() {
+            let (r, phi) = self.to_polar_coordinates();
+            Self::from_polar_coordinates(r.powf(e.re), phi * e.re)
+        } else {
+            (e * self.log()).exp()
+        }
     }
 }
 

@@ -12,10 +12,10 @@ use crate::domains::finite_field::{
     FiniteField, FiniteFieldCore, FiniteFieldWorkspace, ToFiniteField, Zp,
 };
 use crate::domains::integer::{FromFiniteField, Integer, IntegerRing, SMALL_PRIMES, Z};
-use crate::domains::linear_system::{LinearSolverError, Matrix};
 use crate::domains::rational::{Rational, RationalField, Q};
 use crate::domains::{EuclideanDomain, Field, Ring};
 use crate::poly::INLINED_EXPONENTS;
+use crate::tensors::matrix::{Matrix, MatrixError};
 
 use super::polynomial::MultivariatePolynomial;
 use super::Exponent;
@@ -432,7 +432,9 @@ impl<F: Field, E: Exponent> MultivariatePolynomial<F, E> {
         gp
     }
 
-    fn newton_interpolation(
+    /// Perform Newton interpolation in the variable `x`, by providing
+    /// a list of sample points `a` and their evaluations `u`.
+    pub fn newton_interpolation(
         a: &[F::Element],
         u: &[MultivariatePolynomial<F, E>],
         x: usize, // the variable index to extend the polynomial by
@@ -948,8 +950,8 @@ impl<F: Field, E: Exponent> MultivariatePolynomial<F, E> {
                         break; // obtain more samples
                     }
 
-                    let mut gfm = SmallVec::with_capacity(rows * samples_needed);
-                    let mut new_rhs = SmallVec::with_capacity(rows);
+                    let mut gfm = Vec::with_capacity(rows * samples_needed);
+                    let mut new_rhs = Vec::with_capacity(rows);
 
                     for sample_index in 0..samples_needed {
                         let rhs_sec = &samples[shape_map[second_index]][sample_index];
@@ -992,16 +994,14 @@ impl<F: Field, E: Exponent> MultivariatePolynomial<F, E> {
                         new_rhs.push(extra_relations.last().unwrap().clone());
                     }
 
-                    let m = Matrix {
-                        shape: (rows as u32, samples_needed as u32),
-                        data: gfm,
-                        field: a.field.clone(),
-                    };
-                    let rhs = Matrix {
-                        shape: (rows as u32, 1),
-                        data: new_rhs,
-                        field: a.field.clone(),
-                    };
+                    let m = Matrix::from_linear(
+                        gfm,
+                        rows as u32,
+                        samples_needed as u32,
+                        a.field.clone(),
+                    )
+                    .unwrap();
+                    let rhs = Matrix::new_vec(new_rhs, a.field.clone());
 
                     match m.solve(&rhs) {
                         Ok(r) => {
@@ -1014,7 +1014,7 @@ impl<F: Field, E: Exponent> MultivariatePolynomial<F, E> {
                             r.drain(0..vars_second);
                             solved_coeff = Some(r);
                         }
-                        Err(LinearSolverError::Underdetermined {
+                        Err(MatrixError::Underdetermined {
                             row_reduced_matrix, ..
                         }) => {
                             // extract relations between the variables in the scaling term from the row reduced augmented matrix
@@ -1053,11 +1053,16 @@ impl<F: Field, E: Exponent> MultivariatePolynomial<F, E> {
                                 return Err(GCDError::BadOriginalImage);
                             }
                         }
-                        Err(LinearSolverError::Inconsistent) => {
+                        Err(MatrixError::Inconsistent) => {
                             debug!("Inconsistent system: bad shape");
                             return Err(GCDError::BadOriginalImage);
                         }
-                        Err(LinearSolverError::NotSquare) => {
+                        Err(
+                            MatrixError::NotSquare
+                            | MatrixError::ShapeMismatch
+                            | MatrixError::RightHandSideIsNotVector
+                            | MatrixError::Singular,
+                        ) => {
                             unreachable!()
                         }
                     }
@@ -1797,8 +1802,8 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: Exponent> MultivariatePolynomial<
         let rearrange = vars.len() > 1 && vars.windows(2).any(|s| s[0] > s[1]);
         if rearrange {
             debug!("Rearranging variables with map: {:?}", vars);
-            a = Cow::Owned(a.rearrange(&vars, false));
-            b = Cow::Owned(b.rearrange(&vars, false));
+            a = Cow::Owned(a.rearrange_impl(&vars, false, false));
+            b = Cow::Owned(b.rearrange_impl(&vars, false, false));
 
             let mut newbounds: SmallVec<[_; INLINED_EXPONENTS]> =
                 smallvec![E::zero(); bounds.len()];
@@ -1828,7 +1833,7 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: Exponent> MultivariatePolynomial<
         );
 
         if rearrange {
-            g = g.rearrange(&vars, true);
+            g = g.rearrange_impl(&vars, true, false);
         }
 
         rescale_gcd(g, &shared_degree, &base_degree, &content)
