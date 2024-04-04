@@ -21,7 +21,8 @@ inherits = "dev"
 opt-level = 3
 
 [lib]
-crate-type = ["lib"]
+#crate-type = ["lib"]
+crate-type = ["cdylib", "rlib"]
 name = "symbolica"
 
 [features]
@@ -46,6 +47,9 @@ tracing-subscriber = {version = "0.3.18", features = ["env-filter"]}
 default-features = false
 features = ["integer", "rational"]
 version = "1.23"
+
+[build-dependencies]
+pyo3-build-config = "*"
 
 [dependencies]
 ahash = "0.8.7"
