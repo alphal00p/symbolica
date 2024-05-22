@@ -24,8 +24,8 @@ thread_local! { static DENSE_MUL_BUFFER: Cell<Vec<u32>> = const { Cell::new(Vec:
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct PolynomialRing<R: Ring, E: Exponent> {
-    ring: R,
-    variables: Arc<Vec<Variable>>,
+    pub(crate) ring: R,
+    pub(crate) variables: Arc<Vec<Variable>>,
     _phantom_exp: PhantomData<E>,
 }
 
@@ -289,6 +289,18 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         }
     }
 
+    /// Constructs a polynomial with a single term that is a variable.
+    #[inline]
+    pub fn variable(&self, var: &Variable) -> Result<Self, &'static str> {
+        if let Some(pos) = self.variables.iter().position(|v| v == var) {
+            let mut exp = vec![E::zero(); self.nvars()];
+            exp[pos] = E::one();
+            Ok(self.monomial(self.field.one(), exp))
+        } else {
+            Err("Variable not found")
+        }
+    }
+
     /// Get the ith monomial
     pub fn to_monomial_view(&self, i: usize) -> MonomialView<F, E> {
         assert!(i < self.nterms());
@@ -515,6 +527,28 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
             l[i * nvars..(i + 1) * nvars]
                 .swap_with_slice(&mut r[rend - (i + 1) * nvars..rend - i * nvars]);
         }
+    }
+
+    /// Add a variable to the polynomial if it is not already present.
+    pub fn add_variable(&mut self, var: &Variable) {
+        if self.variables.iter().any(|v| v == var) {
+            return;
+        }
+
+        let l = self.variables.len();
+
+        let mut new_exp = vec![E::zero(); (l + 1) * self.nterms()];
+
+        if l > 0 {
+            for (en, e) in new_exp.chunks_mut(l + 1).zip(self.exponents.chunks(l)) {
+                en[..l].copy_from_slice(e);
+            }
+        }
+
+        let mut new_vars = self.variables.as_ref().clone();
+        new_vars.push(var.clone());
+        self.variables = Arc::new(new_vars);
+        self.exponents = new_exp;
     }
 
     /// Check if the polynomial is sorted and has only non-zero coefficients
@@ -3036,6 +3070,19 @@ impl<F: EuclideanDomain, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         (q, r)
     }
+
+    /// Compute the p-adic expansion of the polynomial.
+    /// It returns `[a0, a1, a2, ...]` such that `a0 + a1 * p^1 + a2 * p^2 + ... = self`.
+    pub fn p_adic_expansion(&self, p: &Self) -> Vec<Self> {
+        let mut res = vec![];
+        let mut r = self.clone();
+        while !r.is_zero() {
+            let (q, rem) = r.quot_rem(p, true);
+            res.push(rem);
+            r = q;
+        }
+        res
+    }
 }
 
 impl<F: Field, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
@@ -3048,6 +3095,30 @@ impl<F: Field, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         } else {
             self
         }
+    }
+
+    /// Integrate the polynomial w.r.t the variable `var`,
+    /// producing the antiderivative with zero constant.
+    pub fn integrate(&self, var: usize) -> Self {
+        debug_assert!(var < self.nvars());
+        if self.is_zero() {
+            return self.zero();
+        }
+
+        let mut res = self.zero_with_capacity(self.nterms());
+
+        let mut exp = vec![E::zero(); self.nvars()];
+        for x in self {
+            exp.copy_from_slice(x.exponents);
+            let pow = exp[var].to_u32() as u64;
+            exp[var] = exp[var] + E::one();
+            res.append_monomial(
+                self.field.div(x.coefficient, &self.field.nth(pow + 1)),
+                &exp,
+            );
+        }
+
+        res
     }
 }
 
@@ -3367,5 +3438,79 @@ impl<'a, F: Ring, E: Exponent, O: MonomialOrder> IntoIterator
             poly: self,
             index: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{atom::Atom, domains::integer::Z};
+
+    #[test]
+    fn mul_packed() {
+        let p1 = Atom::parse("v1^2+v2^3*v3*+3*v1^4+4*v2*v3")
+            .unwrap()
+            .to_polynomial::<_, u8>(&Z, None);
+        let b = &p1 * &p1;
+        let r = Atom::parse(
+            "16*v2^2*v3^2+8*v1^2*v2*v3+v1^4+24*v1^4*v2^4*v3^2+6*v1^6*v2^3*v3+9*v1^8*v2^6*v3^2",
+        )
+        .unwrap();
+        assert_eq!(b.to_expression(), r)
+    }
+
+    #[test]
+    fn mul_full() {
+        let p1 = Atom::parse("v1^2+v2^3*v3*+3*v1^4+4*v2*v3+v4+v5+v6*v1*v2+v7*v5+v8+v9*v8")
+            .unwrap()
+            .to_polynomial::<_, u8>(&Z, None);
+        let b = &p1 * &p1;
+
+        let r = Atom::parse(
+            "16*v2^2*v3^2+8*v1*v2^2*v3*v6+8*v1^2*v2*v3+v1^2*v2^2*v6^2+2*v1^3*v2*v6+v1^4+24*v1^4*v2^4*v3^2+6*v1^5*v2^4*v3*v6+6*v1^6*v2^3*v3+9*v1^8*v2^6*v3^2+8*v8*v2*v3+8*v8*v2*v3*v9+2*v8*v1*v2*v6+2*v8*v1*v2*v9*v6+2*v8*v1^2+2*v8*v1^2*v9+6*v8*v1^4*v2^3*v3+6*v8*v1^4*v2^3*v3*v9+v8^2+2*v8^2*v9+v8^2*v9^2+8*v5*v2*v3+8*v5*v2*v3*v7+2*v5*v1*v2*v6+2*v5*v1*v2*v7*v6+2*v5*v1^2+2*v5*v1^2*v7+6*v5*v1^4*v2^3*v3+6*v5*v1^4*v2^3*v3*v7+2*v5*v8+2*v5*v8*v9+2*v5*v8*v7+2*v5*v8*v7*v9+v5^2+2*v5^2*v7+v5^2*v7^2+8*v4*v2*v3+2*v4*v1*v2*v6+2*v4*v1^2+6*v4*v1^4*v2^3*v3+2*v4*v8+2*v4*v8*v9+2*v4*v5+2*v4*v5*v7+v4^2",
+        )
+        .unwrap();
+        assert_eq!(b.to_expression(), r)
+    }
+
+    #[test]
+    fn div_packed() {
+        let p1 = Atom::parse("(v1+v2*5+v3*v2+v1*v2*v3)(v1+v2+v3)")
+            .unwrap()
+            .to_polynomial::<_, u8>(&Z, None);
+
+        let p2 = Atom::parse("v1+v2+v3+1")
+            .unwrap()
+            .to_polynomial::<_, u8>(&Z, p1.variables.clone().into());
+
+        let (q, r) = p1.quot_rem(&p2, false);
+        assert_eq!(
+            q.to_expression(),
+            Atom::parse("-1+5*v2+v1+v1*v2*v3").unwrap()
+        );
+        assert_eq!(
+            r.to_expression(),
+            Atom::parse("1+v3-4*v2+v2*v3^2+v2^2*v3").unwrap()
+        );
+    }
+
+    #[test]
+    fn div_full() {
+        let p1 = Atom::parse("(v1+v2*5+v3*v2+v1*v2*v3+v4+v5+v6+v7+v8+v9*v8)(v1+v2+v3)")
+            .unwrap()
+            .to_polynomial::<_, u8>(&Z, None);
+
+        let p2 = Atom::parse("v1+v2+v3+1")
+            .unwrap()
+            .to_polynomial::<_, u8>(&Z, p1.variables.clone().into());
+
+        let (q, r) = p1.quot_rem(&p2, false);
+        assert_eq!(
+            q.to_expression(),
+            Atom::parse("-1+v8+v8*v9+v7+v6+v5+v4+5*v2+v1+v1*v2*v3").unwrap()
+        );
+        assert_eq!(
+            r.to_expression(),
+            Atom::parse("1-v8-v8*v9-v7-v6-v5-v4+v3-4*v2+v2*v3^2+v2^2*v3").unwrap()
+        );
     }
 }

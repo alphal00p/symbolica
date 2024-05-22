@@ -1,5 +1,5 @@
 mod coefficient;
-pub mod default;
+pub mod representation;
 
 use crate::{
     coefficient::Coefficient,
@@ -9,11 +9,11 @@ use crate::{
 };
 use std::{cmp::Ordering, hash::Hash, ops::DerefMut};
 
-pub use self::default::{
+pub use self::representation::{
     Add, AddView, Fun, ListIterator, ListSlice, Mul, MulView, Num, NumView, Pow, PowView, Var,
     VarView,
 };
-use self::default::{FunView, RawAtom};
+use self::representation::{FunView, RawAtom};
 
 /// A symbol, for example the name of a variable or the name of a function,
 /// together with its properties.
@@ -90,6 +90,16 @@ impl std::fmt::Debug for Symbol {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomType {
+    Num,
+    Var,
+    Add,
+    Mul,
+    Pow,
+    Fun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SliceType {
     Add,
     Mul,
@@ -115,20 +125,6 @@ impl Clone for AtomView<'_> {
 }
 
 impl Copy for AtomView<'_> {}
-
-impl PartialEq<AtomView<'_>> for AtomView<'_> {
-    fn eq(&self, other: &AtomView) -> bool {
-        match (self, other) {
-            (AtomView::Num(n1), AtomView::Num(n2)) => n1 == n2,
-            (AtomView::Var(v1), AtomView::Var(v2)) => v1 == v2,
-            (AtomView::Fun(f1), AtomView::Fun(f2)) => f1 == f2,
-            (AtomView::Pow(p1), AtomView::Pow(p2)) => p1 == p2,
-            (AtomView::Mul(m1), AtomView::Mul(m2)) => m1 == m2,
-            (AtomView::Add(a1), AtomView::Add(a2)) => a1 == a2,
-            _ => false,
-        }
-    }
-}
 
 impl Eq for AtomView<'_> {}
 
@@ -228,6 +224,24 @@ impl<'a> AtomView<'a> {
 
     pub fn clone_into(&self, target: &mut Atom) {
         target.set_from_view(self);
+    }
+
+    #[inline]
+    pub fn is_zero(&self) -> bool {
+        if let AtomView::Num(n) = self {
+            n.is_zero()
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub fn is_one(&self) -> bool {
+        if let AtomView::Num(n) = self {
+            n.is_one()
+        } else {
+            false
+        }
     }
 
     /// Add two atoms and return the buffer that contains the unnormalized result.
@@ -348,7 +362,7 @@ impl<'a> AtomView<'a> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 pub enum Atom {
     Num(Num),
     Var(Var),
@@ -356,14 +370,14 @@ pub enum Atom {
     Pow(Pow),
     Mul(Mul),
     Add(Add),
-    Empty, // for internal use
+    Zero,
 }
 
 impl Default for Atom {
     /// Create an atom that represents the number 0.
     #[inline]
     fn default() -> Self {
-        Num::zero(RawAtom::new()).into()
+        Atom::Zero
     }
 }
 
@@ -409,6 +423,34 @@ impl From<Fun> for Atom {
     }
 }
 
+impl PartialEq for Atom {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_view() == other.as_view()
+    }
+}
+
+impl Eq for Atom {}
+
+impl Hash for Atom {
+    #[inline(always)]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_view().hash(state)
+    }
+}
+
+impl PartialOrd for Atom {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Atom {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_view().cmp(&other.as_view())
+    }
+}
+
 impl Atom {
     /// Create an atom that represents the number 0.
     pub fn new() -> Atom {
@@ -427,12 +469,27 @@ impl Atom {
 
     #[inline]
     pub fn new_num<T: Into<Coefficient>>(num: T) -> Atom {
-        Num::new(num.into()).into()
+        let c = num.into();
+        if c.is_zero() {
+            return Atom::Zero;
+        } else {
+            Num::new(c).into()
+        }
+    }
+
+    #[inline]
+    pub fn is_zero(&self) -> bool {
+        self.as_view().is_zero()
+    }
+
+    #[inline]
+    pub fn is_one(&self) -> bool {
+        self.as_view().is_one()
     }
 
     #[inline]
     pub fn to_num(&mut self, coeff: Coefficient) -> &mut Num {
-        let buffer = std::mem::replace(self, Atom::Empty).into_raw();
+        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Num(Num::new_into(coeff, buffer));
         if let Atom::Num(n) = self {
             n
@@ -443,7 +500,7 @@ impl Atom {
 
     #[inline]
     pub fn to_var(&mut self, id: Symbol) -> &mut Var {
-        let buffer = std::mem::replace(self, Atom::Empty).into_raw();
+        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Var(Var::new_into(id, buffer));
         if let Atom::Var(n) = self {
             n
@@ -454,7 +511,7 @@ impl Atom {
 
     #[inline]
     pub fn to_fun(&mut self, id: Symbol) -> &mut Fun {
-        let buffer = std::mem::replace(self, Atom::Empty).into_raw();
+        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Fun(Fun::new_into(id, buffer));
         if let Atom::Fun(n) = self {
             n
@@ -465,7 +522,7 @@ impl Atom {
 
     #[inline]
     pub fn to_pow(&mut self, base: AtomView, exp: AtomView) -> &mut Pow {
-        let buffer = std::mem::replace(self, Atom::Empty).into_raw();
+        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Pow(Pow::new_into(base, exp, buffer));
         if let Atom::Pow(n) = self {
             n
@@ -476,7 +533,7 @@ impl Atom {
 
     #[inline]
     pub fn to_mul(&mut self) -> &mut Mul {
-        let buffer = std::mem::replace(self, Atom::Empty).into_raw();
+        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Mul(Mul::new_into(buffer));
         if let Atom::Mul(n) = self {
             n
@@ -487,7 +544,7 @@ impl Atom {
 
     #[inline]
     pub fn to_add(&mut self) -> &mut Add {
-        let buffer = std::mem::replace(self, Atom::Empty).into_raw();
+        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Add(Add::new_into(buffer));
         if let Atom::Add(n) = self {
             n
@@ -505,13 +562,13 @@ impl Atom {
             Atom::Pow(p) => p.into_raw(),
             Atom::Mul(m) => m.into_raw(),
             Atom::Add(a) => a.into_raw(),
-            Atom::Empty => unreachable!("Empty atom"),
+            Atom::Zero => RawAtom::new(),
         }
     }
 
     #[inline(always)]
     pub fn set_from_view(&mut self, view: &AtomView) {
-        let buffer = std::mem::replace(self, Atom::Empty).into_raw();
+        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         match view {
             AtomView::Num(n) => *self = Atom::Num(Num::from_view_into(n, buffer)),
             AtomView::Var(v) => *self = Atom::Var(Var::from_view_into(v, buffer)),
@@ -531,7 +588,7 @@ impl Atom {
             Atom::Pow(p) => AtomView::Pow(p.to_pow_view()),
             Atom::Mul(m) => AtomView::Mul(m.to_mul_view()),
             Atom::Add(a) => AtomView::Add(a.to_add_view()),
-            Atom::Empty => unreachable!("Empty atom"),
+            Atom::Zero => AtomView::ZERO,
         }
     }
 
@@ -554,7 +611,7 @@ impl Atom {
             Atom::Pow(a) => a.set_normalized(normalized),
             Atom::Mul(a) => a.set_normalized(normalized),
             Atom::Add(a) => a.set_normalized(normalized),
-            Atom::Empty => unreachable!("Empty atom"),
+            Atom::Zero => {}
         }
     }
 }
@@ -564,12 +621,11 @@ impl Atom {
 /// For example:
 /// ```
 /// # use symbolica::{
-/// #     representations::{Atom, AsAtomView, FunctionBuilder},
+/// #     atom::{Atom, AsAtomView, FunctionBuilder},
 /// #     state::{FunctionAttribute, State},
 /// # };
 /// # fn main() {
-/// ///
-/// let f_id = State::get_or_insert_fn("f", Some(vec![FunctionAttribute::Symmetric])).unwrap();
+/// let f_id = State::get_symbol_with_attributes("f", vec![FunctionAttribute::Symmetric]).unwrap();
 /// let fb = FunctionBuilder::new(f_id);
 /// let a = fb
 ///     .add_arg(&Atom::new_num(3))
@@ -662,6 +718,36 @@ impl Atom {
                 .normalize(ws, &mut t);
             t.into_inner()
         })
+    }
+
+    /// Add the atoms in `args`.
+    pub fn add_many<'a, T: AsAtomView<'a> + Copy>(args: &[T]) -> Atom {
+        let mut out = Atom::new();
+        Workspace::get_local().with(|ws| {
+            let mut t = ws.new_atom();
+            let add = t.to_add();
+            for a in args {
+                add.extend(a.as_atom_view());
+            }
+
+            t.as_view().normalize(ws, &mut out);
+        });
+        out
+    }
+
+    /// Multiply the atoms in `args`.
+    pub fn mul_many<'a, T: AsAtomView<'a> + Copy>(args: &[T]) -> Atom {
+        let mut out = Atom::new();
+        Workspace::get_local().with(|ws| {
+            let mut t = ws.new_atom();
+            let add = t.to_mul();
+            for a in args {
+                add.extend(a.as_atom_view());
+            }
+
+            t.as_view().normalize(ws, &mut out);
+        });
+        out
     }
 }
 
@@ -1035,5 +1121,48 @@ impl<T: Into<Coefficient>> std::ops::Div<T> for Atom {
         });
 
         self
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        atom::{Atom, FunctionBuilder},
+        fun,
+        state::State,
+    };
+
+    #[test]
+    fn debug() {
+        let x = Atom::parse("v1+f1(v2)").unwrap();
+        assert_eq!(
+            format!("{:?}", x),
+            "AddView { data: [5, 17, 2, 13, 2, 1, 12, 3, 5, 0, 0, 0, 1, 42, 2, 1, 13] }"
+        );
+        assert_eq!(
+            x.get_all_symbols(true),
+            [
+                State::get_symbol("v1"),
+                State::get_symbol("v2"),
+                State::get_symbol("f1")
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(x.as_view().get_byte_size(), 17);
+    }
+
+    #[test]
+    fn composition() {
+        let v1 = Atom::parse("v1").unwrap();
+        let v2 = Atom::parse("v2").unwrap();
+        let f1_id = State::get_symbol("f1");
+
+        let f1 = fun!(f1_id, v1, v2, Atom::new_num(2));
+
+        let r = (-(&v2 + &v1 + 2) * &v2 * 6).npow(5) / &v2.pow(&v1) * &f1 / 4;
+
+        let res = Atom::parse("1/4*(v2^v1)^-1*(-6*v2*(v1+v2+2))^5*f1(v1,v2,2)").unwrap();
+        assert_eq!(res, r);
     }
 }

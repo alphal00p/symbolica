@@ -1,11 +1,12 @@
 use std::time::Instant;
 
 use crate::{
+    atom::{Atom, AtomView, Symbol},
     coefficient::{Coefficient, CoefficientView},
     combinatorics::{partitions, unique_permutations},
-    id::{Condition, MatchSettings, Pattern, WildcardAndRestriction},
+    domains::rational::Rational,
+    id::{Condition, MatchSettings, Pattern, Replacement, WildcardAndRestriction},
     printer::{AtomPrinter, PrintOptions},
-    representations::{Atom, AtomView, Symbol},
     state::{State, Workspace},
 };
 use ahash::HashMap;
@@ -61,17 +62,26 @@ pub enum TransformerError {
 #[derive(Clone)]
 pub enum Transformer {
     /// Expand the rhs.
-    Expand,
+    Expand(Option<Symbol>),
     /// Derive the rhs w.r.t a variable.
     Derivative(Symbol),
     /// Derive the rhs w.r.t a variable.
-    TaylorSeries(Symbol, Atom, u32),
-    /// Apply find-and-replace on the rhs.
+    Series(Symbol, Atom, Rational),
+    /// Apply find-and-replace on the lhs.
     ReplaceAll(
         Pattern,
         Pattern,
         Condition<WildcardAndRestriction>,
         MatchSettings,
+    ),
+    /// Apply multiple find-and-replace on the lhs.
+    ReplaceAllMultiple(
+        Vec<(
+            Pattern,
+            Pattern,
+            Condition<WildcardAndRestriction>,
+            MatchSettings,
+        )>,
     ),
     /// Take the product of a list of arguments in the rhs.
     Product,
@@ -84,6 +94,9 @@ pub enum Transformer {
     ArgCount(bool),
     /// Map the rhs with a user-specified function.
     Map(Box<dyn Map>),
+    /// Apply a transformation to each argument of the `arg()` function.
+    /// If the input is not `arg()`, map the current input.
+    ForEach(Vec<Transformer>),
     /// Split a `Mul` or `Add` into a list of arguments.
     Split,
     Partition(Vec<(Symbol, usize)>, bool, bool),
@@ -99,15 +112,19 @@ pub enum Transformer {
 impl std::fmt::Debug for Transformer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Transformer::Expand => f.debug_tuple("Expand").finish(),
+            Transformer::Expand(s) => f.debug_tuple("Expand").field(s).finish(),
             Transformer::Derivative(x) => f.debug_tuple("Derivative").field(x).finish(),
             Transformer::ReplaceAll(pat, rhs, ..) => {
                 f.debug_tuple("ReplaceAll").field(pat).field(rhs).finish()
+            }
+            Transformer::ReplaceAllMultiple(pats) => {
+                f.debug_tuple("ReplaceAllMultiple").field(pats).finish()
             }
             Transformer::Product => f.debug_tuple("Product").finish(),
             Transformer::Sum => f.debug_tuple("Sum").finish(),
             Transformer::ArgCount(p) => f.debug_tuple("ArgCount").field(p).finish(),
             Transformer::Map(_) => f.debug_tuple("Map").finish(),
+            Transformer::ForEach(t) => f.debug_tuple("ForEach").field(t).finish(),
             Transformer::Split => f.debug_tuple("Split").finish(),
             Transformer::Partition(g, b1, b2) => f
                 .debug_tuple("Partition")
@@ -118,7 +135,7 @@ impl std::fmt::Debug for Transformer {
             Transformer::Sort => f.debug_tuple("Sort").finish(),
             Transformer::Deduplicate => f.debug_tuple("Deduplicate").finish(),
             Transformer::Permutations(i) => f.debug_tuple("Permutations").field(i).finish(),
-            Transformer::TaylorSeries(x, point, d) => f
+            Transformer::Series(x, point, d) => f
                 .debug_tuple("TaylorSeries")
                 .field(x)
                 .field(point)
@@ -157,7 +174,6 @@ impl Transformer {
     pub fn execute(
         orig_input: AtomView<'_>,
         chain: &[Transformer],
-
         workspace: &Workspace,
         out: &mut Atom,
     ) -> Result<(), TransformerError> {
@@ -171,20 +187,37 @@ impl Transformer {
                 Transformer::Map(f) => {
                     f(input, out)?;
                 }
-                Transformer::Expand => {
-                    input.expand_with_ws_into(workspace, out);
+                Transformer::ForEach(t) => {
+                    if let AtomView::Fun(f) = input {
+                        if f.get_symbol() == State::ARG {
+                            let mut ff = workspace.new_atom();
+                            let ff = ff.to_fun(State::ARG);
+
+                            let mut a = workspace.new_atom();
+                            for arg in f.iter() {
+                                Self::execute(arg, t, workspace, &mut a)?;
+                                ff.add_arg(a.as_view());
+                            }
+
+                            ff.as_view().normalize(workspace, out);
+                            continue;
+                        }
+                    }
+
+                    Self::execute(input, t, workspace, out)?;
+                }
+                Transformer::Expand(s) => {
+                    input.expand_with_ws_into(workspace, *s, out);
                 }
                 Transformer::Derivative(x) => {
                     input.derivative_with_ws_into(*x, workspace, out);
                 }
-                Transformer::TaylorSeries(x, expansion_point, depth) => {
-                    input.taylor_series_with_ws_into(
-                        *x,
-                        expansion_point.as_view(),
-                        *depth,
-                        workspace,
-                        out,
-                    );
+                Transformer::Series(x, expansion_point, depth) => {
+                    if let Ok(s) = input.series(*x, expansion_point.as_view(), depth.clone()) {
+                        s.to_atom_into(out);
+                    } else {
+                        out.set_from_view(&input);
+                    }
                 }
                 Transformer::ReplaceAll(pat, rhs, cond, settings) => {
                     pat.replace_all_with_ws_into(
@@ -195,6 +228,17 @@ impl Transformer {
                         settings.into(),
                         out,
                     );
+                }
+                Transformer::ReplaceAllMultiple(replacements) => {
+                    let reps = replacements
+                        .iter()
+                        .map(|(pat, rhs, cond, settings)| {
+                            Replacement::new(&pat, &rhs)
+                                .with_conditions(&cond)
+                                .with_settings(&settings)
+                        })
+                        .collect::<Vec<_>>();
+                    input.replace_all_multiple_into(&reps, out);
                 }
                 Transformer::Product => {
                     if let AtomView::Fun(f) = input {
@@ -463,7 +507,11 @@ impl Transformer {
                 Transformer::FromNumber => {
                     if let AtomView::Num(n) = input {
                         if let CoefficientView::RationalPolynomial(r) = n.get_coeff_view() {
-                            r.to_expression_with_map(workspace, &HashMap::default(), out);
+                            r.deserialize().to_expression_with_map(
+                                workspace,
+                                &HashMap::default(),
+                                out,
+                            );
                             continue;
                         }
                     }
@@ -474,5 +522,155 @@ impl Transformer {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        atom::{Atom, FunctionBuilder},
+        id::{Condition, Match, MatchSettings, Pattern, PatternRestriction},
+        printer::PrintOptions,
+        state::{State, Workspace},
+        transformer::StatsOptions,
+    };
+
+    use super::Transformer;
+
+    #[test]
+    fn expand_derivative() {
+        let p = Atom::parse("(1+v1)^2").unwrap();
+
+        let mut out = Atom::new();
+        Workspace::get_local().with(|ws| {
+            Transformer::execute(
+                p.as_view(),
+                &[
+                    Transformer::Expand(Some(State::get_symbol("v1"))),
+                    Transformer::Derivative(State::get_symbol("v1")),
+                ],
+                ws,
+                &mut out,
+            )
+            .unwrap()
+        });
+
+        let r = Atom::parse("2+2*v1").unwrap();
+        assert_eq!(out, r);
+    }
+
+    #[test]
+    fn split_argcount() {
+        let p = Atom::parse("v1+v2+v3").unwrap();
+
+        let mut out = Atom::new();
+        Workspace::get_local().with(|ws| {
+            Transformer::execute(
+                p.as_view(),
+                &[Transformer::Split, Transformer::ArgCount(true)],
+                ws,
+                &mut out,
+            )
+            .unwrap()
+        });
+
+        let r = Atom::parse("3").unwrap();
+        assert_eq!(out, r);
+    }
+
+    #[test]
+    fn product_series() {
+        let p = Atom::parse("arg(v1,v1+1,3)").unwrap();
+
+        let mut out = Atom::new();
+        Workspace::get_local().with(|ws| {
+            Transformer::execute(
+                p.as_view(),
+                &[
+                    Transformer::Product,
+                    Transformer::Series(State::get_symbol("v1"), Atom::new_num(1), 3.into()),
+                ],
+                ws,
+                &mut out,
+            )
+            .unwrap()
+        });
+
+        let r = Atom::parse("3*(v1-1)^2+9*(v1-1)+6").unwrap();
+        assert_eq!(out, r);
+    }
+
+    #[test]
+    fn sort_deduplicate() {
+        let p = Atom::parse("f1(3,2,1,3)").unwrap();
+
+        let mut out = Atom::new();
+        Workspace::get_local().with(|ws| {
+            Transformer::execute(
+                p.as_view(),
+                &[
+                    Transformer::ReplaceAll(
+                        Pattern::parse("f1(x__)").unwrap(),
+                        Pattern::parse("x__").unwrap(),
+                        Condition::default(),
+                        MatchSettings::default(),
+                    ),
+                    Transformer::Sort,
+                    Transformer::Deduplicate,
+                    Transformer::Map(Box::new(|x, out| {
+                        let mut f = FunctionBuilder::new(State::get_symbol("f1"));
+                        f = f.add_arg(x);
+                        *out = f.finish();
+                        Ok(())
+                    })),
+                ],
+                ws,
+                &mut out,
+            )
+            .unwrap()
+        });
+
+        let r = Atom::parse("f1(1,2,3)").unwrap();
+        assert_eq!(out, r);
+    }
+
+    #[test]
+    fn deep_nesting() {
+        let p = Atom::parse("arg(3,2,1,3)").unwrap();
+
+        let mut out = Atom::new();
+        Workspace::get_local().with(|ws| {
+            Transformer::execute(
+                p.as_view(),
+                &[Transformer::Repeat(vec![Transformer::Stats(
+                    StatsOptions {
+                        tag: "test".to_owned(),
+                        color_medium_change_threshold: Some(10.),
+                        color_large_change_threshold: Some(100.),
+                    },
+                    vec![Transformer::ForEach(vec![
+                        Transformer::Print(PrintOptions::default()),
+                        Transformer::ReplaceAll(
+                            Pattern::parse("x_").unwrap(),
+                            Pattern::parse("x_-1").unwrap(),
+                            (
+                                State::get_symbol("x_"),
+                                PatternRestriction::Filter(Box::new(|x| {
+                                    x != &Match::Single(Atom::new_num(0).as_view())
+                                })),
+                            )
+                                .into(),
+                            MatchSettings::default(),
+                        ),
+                    ])],
+                )])],
+                ws,
+                &mut out,
+            )
+            .unwrap()
+        });
+
+        let r = Atom::parse("arg(0,0,0,0)").unwrap();
+        assert_eq!(out, r);
     }
 }

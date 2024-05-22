@@ -1,3 +1,24 @@
+//! Symbolica is a blazing fast computer algebra system.
+//!
+//! It can be used to perform mathematical operations,
+//! such as symbolic differentiation, integration, simplification,
+//! pattern matching and solving equations.
+//!
+//! For example:
+//!
+//! ```
+//! use symbolica::{atom::Atom, state::State};
+//!
+//! fn main() {
+//!     let input = Atom::parse("x^2*log(2*x + y) + exp(3*x)").unwrap();
+//!     let a = input.derivative(State::get_symbol("x"));
+//!     println!("d({})/dx = {}:", input, a);
+//! }
+//! ```
+//!
+//! Check out the [guide](https://symbolica.io/docs/get_started.html) for more information, examples,
+//! and additional documentation.
+
 use std::{
     collections::HashMap,
     env,
@@ -12,22 +33,22 @@ use colored::Colorize;
 use once_cell::sync::OnceCell;
 use tinyjson::JsonValue;
 
-pub mod api;
+mod api;
+pub mod atom;
 pub mod coefficient;
-pub mod collect;
+mod collect;
 pub mod combinatorics;
-pub mod derivative;
+mod derivative;
 pub mod domains;
 pub mod evaluate;
-pub mod expand;
+mod expand;
 pub mod id;
-pub mod normalize;
+mod normalize;
 pub mod numerical_integration;
 pub mod parser;
 pub mod poly;
 pub mod printer;
-pub mod representations;
-pub mod solve;
+mod solve;
 pub mod state;
 pub mod streaming;
 pub mod tensors;

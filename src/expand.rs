@@ -3,10 +3,10 @@ use std::ops::DerefMut;
 use smallvec::SmallVec;
 
 use crate::{
+    atom::{Atom, AtomView, Symbol},
     coefficient::CoefficientView,
     combinatorics::CombinationWithReplacementIterator,
     domains::integer::Integer,
-    representations::{Atom, AtomView},
     state::{RecycledAtom, Workspace},
 };
 
@@ -16,9 +16,14 @@ impl Atom {
         self.as_view().expand()
     }
 
+    /// Expand an expression in the variable `var`.
+    pub fn expand_in(&self, var: Symbol) -> Atom {
+        self.as_view().expand_in(var)
+    }
+
     /// Expand an expression, returning `true` iff the expression changed.
     pub fn expand_into(&self, out: &mut Atom) -> bool {
-        self.as_view().expand_into(out)
+        self.as_view().expand_into(None, out)
     }
 }
 
@@ -27,19 +32,33 @@ impl<'a> AtomView<'a> {
     pub fn expand(&self) -> Atom {
         Workspace::get_local().with(|ws| {
             let mut a = ws.new_atom();
-            self.expand_with_ws_into(ws, &mut a);
+            self.expand_with_ws_into(ws, None, &mut a);
+            a.into_inner()
+        })
+    }
+
+    /// Expand an expression.
+    pub fn expand_in(&self, var: Symbol) -> Atom {
+        Workspace::get_local().with(|ws| {
+            let mut a = ws.new_atom();
+            self.expand_with_ws_into(ws, Some(var), &mut a);
             a.into_inner()
         })
     }
 
     /// Expand an expression, returning `true` iff the expression changed.
-    pub fn expand_into(&self, out: &mut Atom) -> bool {
-        Workspace::get_local().with(|ws| self.expand_with_ws_into(ws, out))
+    pub fn expand_into(&self, var: Option<Symbol>, out: &mut Atom) -> bool {
+        Workspace::get_local().with(|ws| self.expand_with_ws_into(ws, var, out))
     }
 
     /// Expand an expression, returning `true` iff the expression changed.
-    pub fn expand_with_ws_into(&self, workspace: &Workspace, out: &mut Atom) -> bool {
-        let changed = self.expand_no_norm(workspace, out);
+    pub fn expand_with_ws_into(
+        &self,
+        workspace: &Workspace,
+        var: Option<Symbol>,
+        out: &mut Atom,
+    ) -> bool {
+        let changed = self.expand_no_norm(workspace, var, out);
 
         if changed {
             let mut a = workspace.new_atom();
@@ -51,16 +70,23 @@ impl<'a> AtomView<'a> {
     }
 
     /// Expand an expression, but do not normalize the result.
-    fn expand_no_norm(&self, workspace: &Workspace, out: &mut Atom) -> bool {
+    fn expand_no_norm(&self, workspace: &Workspace, var: Option<Symbol>, out: &mut Atom) -> bool {
+        if let Some(s) = var {
+            if !self.contains_symbol(s) {
+                out.set_from_view(self);
+                return false;
+            }
+        }
+
         match self {
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
 
                 let mut new_base = workspace.new_atom();
-                let mut changed = base.expand_with_ws_into(workspace, &mut new_base);
+                let mut changed = base.expand_with_ws_into(workspace, var, &mut new_base);
 
                 let mut new_exp = workspace.new_atom();
-                changed |= exp.expand_with_ws_into(workspace, &mut new_exp);
+                changed |= exp.expand_with_ws_into(workspace, var, &mut new_exp);
 
                 let (negative, num) = 'get_num: {
                     if let AtomView::Num(n) = new_exp.as_view() {
@@ -108,9 +134,11 @@ impl<'a> AtomView<'a> {
                         hh.as_view().normalize(workspace, &mut normalized_child);
 
                         let mut expanded_child = workspace.new_atom();
-                        normalized_child
-                            .as_view()
-                            .expand_with_ws_into(workspace, &mut expanded_child);
+                        normalized_child.as_view().expand_with_ws_into(
+                            workspace,
+                            var,
+                            &mut expanded_child,
+                        );
 
                         let coeff_f = Integer::multinom(new_term);
                         if coeff_f != Integer::one() {
@@ -150,7 +178,11 @@ impl<'a> AtomView<'a> {
                     let mul = mul_h.to_mul();
 
                     let mut exp_h = workspace.new_atom();
-                    exp_h.to_num((num as i64).into());
+                    if negative {
+                        exp_h.to_num((-(num as i64)).into());
+                    } else {
+                        exp_h.to_num((num as i64).into());
+                    }
 
                     for arg in m.iter() {
                         let mut pow_h = workspace.new_atom();
@@ -158,16 +190,8 @@ impl<'a> AtomView<'a> {
                         mul.extend(pow_h.as_view());
                     }
 
-                    if negative {
-                        let mut num_h = workspace.new_atom();
-                        num_h.to_num((-1).into());
+                    mul_h.as_view().normalize(workspace, out);
 
-                        let mut pow_h = workspace.new_atom();
-                        pow_h.to_pow(mul_h.as_view(), num_h.as_view());
-                        pow_h.as_view().normalize(workspace, out);
-                    } else {
-                        mul_h.as_view().normalize(workspace, out);
-                    }
                     true
                 } else {
                     let mut pow_h = workspace.new_atom();
@@ -185,7 +209,7 @@ impl<'a> AtomView<'a> {
 
                 for arg in m.iter() {
                     let mut new_arg = workspace.new_atom();
-                    changed |= arg.expand_with_ws_into(workspace, &mut new_arg);
+                    changed |= arg.expand_with_ws_into(workspace, var, &mut new_arg);
 
                     // expand (1+x)*y
                     if let AtomView::Add(a) = new_arg.as_view() {
@@ -259,7 +283,7 @@ impl<'a> AtomView<'a> {
 
                 let mut new_arg = workspace.new_atom();
                 for arg in a.iter() {
-                    changed |= arg.expand_no_norm(workspace, &mut new_arg);
+                    changed |= arg.expand_no_norm(workspace, var, &mut new_arg);
                     add.extend(new_arg.as_view());
                 }
 
@@ -271,5 +295,47 @@ impl<'a> AtomView<'a> {
                 false
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{atom::Atom, state::State};
+
+    #[test]
+    fn exponent() {
+        let exp = Atom::parse("(1+v1+v2)^4").unwrap().expand();
+        let res = Atom::parse("4*v1+4*v2+6*v1^2+4*v1^3+v1^4+6*v2^2+4*v2^3+v2^4+12*v1*v2+12*v1*v2^2+4*v1*v2^3+12*v1^2*v2+6*v1^2*v2^2+4*v1^3*v2+1").unwrap();
+        assert_eq!(exp, res);
+    }
+
+    #[test]
+    fn association() {
+        let exp = Atom::parse("(1+v1)*(2+v2)*(3+v1)").unwrap().expand();
+        let res = Atom::parse("8*v1+3*v2+2*v1^2+4*v1*v2+v1^2*v2+6").unwrap();
+        assert_eq!(exp, res);
+    }
+
+    #[test]
+    fn mul_pow() {
+        let exp = Atom::parse("(v1*v2*2)^3*2").unwrap().expand();
+        let res = Atom::parse("v1^3*v2^3*16").unwrap();
+        assert_eq!(exp, res);
+    }
+
+    #[test]
+    fn mul_pow_neg() {
+        let exp = Atom::parse("(v1*v2*2)^-3").unwrap().expand();
+        let res = Atom::parse("8^-1*v1^-3*v2^-3").unwrap();
+        assert_eq!(exp, res);
+    }
+
+    #[test]
+    fn expand_in_var() {
+        let exp = Atom::parse("(1+v1)^2+(1+v2)^100")
+            .unwrap()
+            .expand_in(State::get_symbol("v1"));
+        let res = Atom::parse("1+2*v1+v1^2+(v2+1)^100").unwrap();
+        assert_eq!(exp, res);
     }
 }

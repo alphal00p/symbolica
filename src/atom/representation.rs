@@ -1,12 +1,18 @@
 use byteorder::{LittleEndian, WriteBytesExt};
 use bytes::{Buf, BufMut};
-use std::cmp::Ordering;
+use std::{
+    cmp::Ordering,
+    io::{Read, Write},
+};
 
-use crate::coefficient::{Coefficient, CoefficientView};
+use crate::{
+    coefficient::{Coefficient, CoefficientView},
+    state::{StateMap, Workspace},
+};
 
 use super::{
     coefficient::{PackedRationalNumberReader, PackedRationalNumberWriter},
-    AtomView, SliceType, Symbol,
+    Atom, AtomView, SliceType, Symbol,
 };
 
 const NUM_ID: u8 = 1;
@@ -23,10 +29,54 @@ const VAR_WILDCARD_LEVEL_2: u8 = 0b00010000;
 const VAR_WILDCARD_LEVEL_3: u8 = 0b00011000;
 const FUN_SYMMETRIC_FLAG: u8 = 0b00100000;
 const FUN_LINEAR_FLAG: u8 = 0b01000000;
+const VAR_ANTISYMMETRIC_FLAG: u8 = 0b10000000;
 const FUN_ANTISYMMETRIC_FLAG: u64 = 1 << 32; // stored in the function id
 const MUL_HAS_COEFF_FLAG: u8 = 0b01000000;
 
+const ZERO_DATA: [u8; 3] = [NUM_ID, 1, 0];
+
 pub type RawAtom = Vec<u8>;
+
+impl Atom {
+    /// Read from a binary stream. The format is the byte-length first
+    /// followed by the data.
+    pub(crate) fn read<R: Read>(&mut self, mut source: R) -> Result<(), std::io::Error> {
+        let mut dest = std::mem::replace(self, Atom::Zero).into_raw();
+
+        // should also set whether rat poly coefficient needs to be converted
+        let mut flags_buf = [0; 1];
+        let mut size_buf = [0; 8];
+
+        source.read_exact(&mut flags_buf)?;
+        source.read_exact(&mut size_buf)?;
+
+        let n_size = u64::from_le_bytes(size_buf);
+
+        dest.extend(size_buf);
+        dest.resize(n_size as usize, 0);
+        source.read_exact(&mut dest)?;
+
+        unsafe {
+            match dest[0] & TYPE_MASK {
+                NUM_ID => *self = Atom::Num(Num::from_raw(dest)),
+                VAR_ID => *self = Atom::Var(Var::from_raw(dest)),
+                FUN_ID => *self = Atom::Fun(Fun::from_raw(dest)),
+                MUL_ID => *self = Atom::Mul(Mul::from_raw(dest)),
+                ADD_ID => *self = Atom::Add(Add::from_raw(dest)),
+                POW_ID => *self = Atom::Pow(Pow::from_raw(dest)),
+                _ => unreachable!("Unknown type {}", dest[0]),
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn import<R: Read>(source: R, state_map: &StateMap) -> Result<Atom, std::io::Error> {
+        let mut a = Atom::new();
+        a.read(source)?;
+        Ok(a.as_view().rename(state_map))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Num {
@@ -113,6 +163,11 @@ impl Num {
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
+
+    #[inline(always)]
+    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Num {
+        Num { data: raw }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -123,32 +178,14 @@ pub struct Var {
 impl Var {
     #[inline]
     pub fn new(symbol: Symbol) -> Var {
-        let mut buffer = Vec::new();
-
-        match symbol.wildcard_level {
-            0 => buffer.put_u8(VAR_ID),
-            1 => buffer.put_u8(VAR_ID | VAR_WILDCARD_LEVEL_1),
-            2 => buffer.put_u8(VAR_ID | VAR_WILDCARD_LEVEL_2),
-            _ => buffer.put_u8(VAR_ID | VAR_WILDCARD_LEVEL_3),
-        }
-
-        (symbol.id as u64, 1).write_packed(&mut buffer);
-        Var { data: buffer }
+        Self::new_into(symbol, RawAtom::new())
     }
 
     #[inline]
-    pub fn new_into(symbol: Symbol, mut buffer: RawAtom) -> Var {
-        buffer.clear();
-
-        match symbol.wildcard_level {
-            0 => buffer.put_u8(VAR_ID),
-            1 => buffer.put_u8(VAR_ID | VAR_WILDCARD_LEVEL_1),
-            2 => buffer.put_u8(VAR_ID | VAR_WILDCARD_LEVEL_2),
-            _ => buffer.put_u8(VAR_ID | VAR_WILDCARD_LEVEL_3),
-        }
-
-        (symbol.id as u64, 1).write_packed(&mut buffer);
-        Var { data: buffer }
+    pub fn new_into(symbol: Symbol, buffer: RawAtom) -> Var {
+        let mut f = Var { data: buffer };
+        f.set_from_symbol(symbol);
+        f
     }
 
     #[inline]
@@ -159,17 +196,30 @@ impl Var {
     }
 
     #[inline]
-    pub fn set_from_symbol(&mut self, id: Symbol) {
+    pub fn set_from_symbol(&mut self, symbol: Symbol) {
         self.data.clear();
 
-        match id.wildcard_level {
-            0 => self.data.put_u8(VAR_ID),
-            1 => self.data.put_u8(VAR_ID | VAR_WILDCARD_LEVEL_1),
-            2 => self.data.put_u8(VAR_ID | VAR_WILDCARD_LEVEL_2),
-            _ => self.data.put_u8(VAR_ID | VAR_WILDCARD_LEVEL_3),
+        let mut flags = VAR_ID;
+        match symbol.wildcard_level {
+            0 => {}
+            1 => flags |= VAR_WILDCARD_LEVEL_1,
+            2 => flags |= VAR_WILDCARD_LEVEL_2,
+            _ => flags |= VAR_WILDCARD_LEVEL_3,
         }
 
-        (id.id as u64, 1).write_packed(&mut self.data);
+        if symbol.is_symmetric {
+            flags |= FUN_SYMMETRIC_FLAG;
+        }
+        if symbol.is_linear {
+            flags |= FUN_LINEAR_FLAG;
+        }
+        if symbol.is_antisymmetric {
+            flags |= VAR_ANTISYMMETRIC_FLAG;
+        }
+
+        self.data.put_u8(flags);
+
+        (symbol.id as u64, 1).write_packed(&mut self.data);
     }
 
     #[inline]
@@ -196,6 +246,11 @@ impl Var {
     #[inline(always)]
     pub fn into_raw(self) -> RawAtom {
         self.data
+    }
+
+    #[inline(always)]
+    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Var {
+        Var { data: raw }
     }
 }
 
@@ -342,6 +397,11 @@ impl Fun {
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
+
+    #[inline(always)]
+    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Fun {
+        Fun { data: raw }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -401,6 +461,11 @@ impl Pow {
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
+
+    #[inline(always)]
+    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Pow {
+        Pow { data: raw }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -454,6 +519,7 @@ impl Mul {
         self.data.extend(view.data);
     }
 
+    #[inline]
     pub(crate) fn extend(&mut self, other: AtomView<'_>) {
         self.data[0] |= NOT_NORMALIZED;
 
@@ -467,12 +533,20 @@ impl Mul {
 
         let old_size = unsafe { c.as_ptr().offset_from(self.data.as_ptr()) } as usize - 1 - 4;
 
-        let new_slice = match other {
-            AtomView::Mul(m) => m.to_slice(),
-            _ => ListSlice::from_one(other),
-        };
+        let data_start = match other {
+            AtomView::Mul(m) => {
+                let mut sd = &m.data[1 + 4..];
+                let sub_n_args;
+                (sub_n_args, _, sd) = sd.get_frac_u64();
 
-        n_args += new_slice.len() as u64;
+                n_args += sub_n_args;
+                sd
+            }
+            _ => {
+                n_args += 1;
+                &other.get_data()
+            }
+        };
 
         let new_size = (n_args, 1).get_packed_size() as usize;
 
@@ -493,9 +567,7 @@ impl Mul {
         // size should be ok now
         (n_args, 1).write_packed_fixed(&mut self.data[1 + 4..1 + 4 + new_size]);
 
-        for child in new_slice.iter() {
-            self.data.extend_from_slice(child.get_data());
-        }
+        self.data.extend_from_slice(data_start);
 
         let new_buf_pos = self.data.len();
 
@@ -577,6 +649,11 @@ impl Mul {
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
+
+    #[inline(always)]
+    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Mul {
+        Mul { data: raw }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -600,11 +677,7 @@ impl Add {
     pub(crate) fn new_into(mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.put_u8(ADD_ID | NOT_NORMALIZED);
-        buffer.put_u32_le(0_u32);
-        (0u64, 1).write_packed(&mut buffer);
-        let len = buffer.len() as u32 - 1 - 4;
-        (&mut buffer[1..]).put_u32_le(len);
-
+        (0u64, 0).write_packed(&mut buffer);
         Add { data: buffer }
     }
 
@@ -624,58 +697,52 @@ impl Add {
         }
     }
 
+    #[inline]
     pub(crate) fn extend(&mut self, other: AtomView<'_>) {
         self.data[0] |= NOT_NORMALIZED;
 
-        // may increase size of the num of args
-        let mut c = &self.data[1 + 4..];
-
-        let buf_pos = 1 + 4;
+        let mut c = &self.data[1..];
 
         let mut n_args;
         (n_args, _, c) = c.get_frac_u64();
 
-        let old_size = unsafe { c.as_ptr().offset_from(self.data.as_ptr()) } as usize - 1 - 4;
+        let old_header_size = unsafe { c.as_ptr().offset_from(self.data.as_ptr()) } as usize;
 
-        let new_slice = match other {
-            AtomView::Add(m) => m.to_slice(),
-            _ => ListSlice::from_one(other),
+        match other {
+            AtomView::Add(m) => {
+                let mut sd = &m.data[1..];
+                let sub_n_args;
+                (sub_n_args, _, sd) = sd.get_frac_u64();
+
+                n_args += sub_n_args;
+                self.data.extend_from_slice(&sd);
+            }
+            _ => {
+                n_args += 1;
+                self.data.extend_from_slice(&other.get_data());
+            }
         };
 
-        n_args += new_slice.len() as u64;
+        let new_len = self.data.len() - old_header_size;
+        let new_header_size = (n_args, new_len as u64).get_packed_size() as usize + 1;
 
-        let new_size = (n_args, 1).get_packed_size() as usize;
-
-        match new_size.cmp(&old_size) {
+        match new_header_size.cmp(&old_header_size) {
             Ordering::Equal => {}
             Ordering::Less => {
-                self.data.copy_within(1 + 4 + old_size.., 1 + 4 + new_size);
-                self.data.resize(self.data.len() - old_size + new_size, 0);
+                self.data.copy_within(old_header_size.., new_header_size);
+                self.data
+                    .resize(self.data.len() - old_header_size + new_header_size, 0);
             }
             Ordering::Greater => {
                 let old_len = self.data.len();
-                self.data.resize(old_len + new_size - old_size, 0);
                 self.data
-                    .copy_within(1 + 4 + old_size..old_len, 1 + 4 + new_size);
+                    .resize(old_len + new_header_size - old_header_size, 0);
+                self.data
+                    .copy_within(old_header_size..old_len, new_header_size);
             }
         }
 
-        // size should be ok now
-        (n_args, 1).write_packed_fixed(&mut self.data[1 + 4..1 + 4 + new_size]);
-
-        for child in new_slice.iter() {
-            self.data.extend_from_slice(child.get_data());
-        }
-
-        let new_buf_pos = self.data.len();
-
-        let mut cursor = &mut self.data[1..];
-
-        assert!(new_buf_pos - buf_pos < u32::MAX as usize, "Term too large");
-
-        cursor
-            .write_u32::<LittleEndian>((new_buf_pos - buf_pos) as u32)
-            .unwrap();
+        (n_args, new_len as u64).write_packed_fixed(&mut self.data[1..new_header_size]);
     }
 
     #[inline(always)]
@@ -703,6 +770,11 @@ impl Add {
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
+
+    #[inline(always)]
+    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Add {
+        Add { data: raw }
+    }
 }
 
 impl<'a> VarView<'a> {
@@ -725,9 +797,12 @@ impl<'a> VarView<'a> {
 
     #[inline(always)]
     pub fn get_symbol(&self) -> Symbol {
-        Symbol::init_var(
-            self.data[1..].get_frac_i64().0 as u32,
+        Symbol::init_fn(
+            self.data[1..].get_frac_u64().0 as u32,
             self.get_wildcard_level(),
+            self.data[0] & FUN_SYMMETRIC_FLAG != 0,
+            self.data[0] & VAR_ANTISYMMETRIC_FLAG != 0,
+            self.data[0] & FUN_LINEAR_FLAG != 0,
         )
     }
 
@@ -846,7 +921,7 @@ impl<'a> FunView<'a> {
         c.get_u32_le(); // size
 
         let n_args;
-        (_, n_args, c) = c.get_frac_i64(); // name
+        (_, n_args, c) = c.get_frac_u64(); // name
 
         ListIterator {
             data: c,
@@ -864,7 +939,7 @@ impl<'a> FunView<'a> {
         c.get_u32_le(); // size
 
         let n_args;
-        (_, n_args, c) = c.get_frac_i64(); // name
+        (_, n_args, c) = c.get_frac_u64(); // name
 
         ListSlice {
             data: c,
@@ -1048,7 +1123,7 @@ impl<'a> MulView<'a> {
     }
 
     pub fn get_nargs(&self) -> usize {
-        self.data[1 + 4..].get_frac_i64().0 as usize
+        self.data[1 + 4..].get_frac_u64().0 as usize
     }
 
     #[inline]
@@ -1058,7 +1133,7 @@ impl<'a> MulView<'a> {
         c.get_u32_le(); // size
 
         let n_args;
-        (n_args, _, c) = c.get_frac_i64();
+        (n_args, _, c) = c.get_frac_u64();
 
         ListIterator {
             data: c,
@@ -1077,7 +1152,7 @@ impl<'a> MulView<'a> {
         c.get_u32_le(); // size
 
         let n_args;
-        (n_args, _, c) = c.get_frac_i64();
+        (n_args, _, c) = c.get_frac_u64();
 
         ListSlice {
             data: c,
@@ -1130,17 +1205,16 @@ impl<'a> AddView<'a> {
 
     #[inline(always)]
     pub fn get_nargs(&self) -> usize {
-        self.data[1 + 4..].get_frac_i64().0 as usize
+        self.data[1..].get_frac_u64().0 as usize
     }
 
     #[inline]
     pub fn iter(&self) -> ListIterator<'a> {
         let mut c = self.data;
         c.get_u8();
-        c.get_u32_le(); // size
 
         let n_args;
-        (n_args, _, c) = c.get_frac_i64();
+        (n_args, _, c) = c.get_frac_u64();
 
         ListIterator {
             data: c,
@@ -1156,10 +1230,9 @@ impl<'a> AddView<'a> {
     pub fn to_slice(&self) -> ListSlice<'a> {
         let mut c = self.data;
         c.get_u8();
-        c.get_u32_le(); // size
 
         let n_args;
-        (n_args, _, c) = c.get_frac_i64();
+        (n_args, _, c) = c.get_frac_u64();
 
         ListSlice {
             data: c,
@@ -1174,6 +1247,8 @@ impl<'a> AddView<'a> {
 }
 
 impl<'a> AtomView<'a> {
+    pub const ZERO: Self = Self::Num(NumView { data: &ZERO_DATA });
+
     pub fn from(source: &'a [u8]) -> AtomView<'a> {
         match source[0] & TYPE_MASK {
             VAR_ID => AtomView::Var(VarView { data: source }),
@@ -1186,6 +1261,7 @@ impl<'a> AtomView<'a> {
         }
     }
 
+    #[inline(always)]
     pub fn get_data(&self) -> &'a [u8] {
         match self {
             AtomView::Num(n) => n.data,
@@ -1195,6 +1271,108 @@ impl<'a> AtomView<'a> {
             AtomView::Mul(t) => t.data,
             AtomView::Add(e) => e.data,
         }
+    }
+
+    /// Write the expression to a binary stream. The format is the byte-length first
+    /// followed by the data. To import the expression in new session, also export the [`State`].
+    #[inline(always)]
+    pub fn write<W: Write>(&self, mut dest: W) -> Result<(), std::io::Error> {
+        let d = self.get_data();
+        dest.write_u8(0)?;
+        dest.write_u64::<LittleEndian>(d.len() as u64)?;
+        dest.write_all(d)
+    }
+
+    pub(crate) fn rename(&self, state_map: &StateMap) -> Atom {
+        Workspace::get_local().with(|ws| {
+            let mut a = ws.new_atom();
+            self.rename_no_norm(state_map, ws, &mut a);
+            let mut r = Atom::new();
+            a.as_view().normalize(ws, &mut r);
+            r
+        })
+    }
+
+    fn rename_no_norm(&self, state_map: &StateMap, ws: &Workspace, out: &mut Atom) {
+        match self {
+            AtomView::Num(n) => match n.get_coeff_view() {
+                CoefficientView::FiniteField(e, i) => {
+                    if let Some(s) = state_map.finite_fields.get(&i) {
+                        out.to_num(Coefficient::FiniteField(e, *s));
+                    } else {
+                        out.set_from_view(self);
+                    }
+                }
+                CoefficientView::RationalPolynomial(r) => {
+                    let (old_id, _, _) = r.0.get_frac_u64();
+
+                    if let Some(nv) = state_map.variables_lists.get(&old_id) {
+                        let mut rr = r.deserialize();
+                        rr.numerator.variables = nv.clone();
+                        rr.denominator.variables = nv.clone();
+                        out.to_num(Coefficient::RationalPolynomial(rr));
+                    } else {
+                        out.set_from_view(self);
+                    }
+                }
+                _ => out.set_from_view(self),
+            },
+            AtomView::Var(v) => {
+                if let Some(s) = state_map.symbols.get(&v.get_symbol().get_id()) {
+                    out.to_var(*s);
+                } else {
+                    out.set_from_view(self);
+                }
+            }
+            AtomView::Fun(f) => {
+                if let Some(s) = state_map.symbols.get(&f.get_symbol().get_id()) {
+                    let nf = out.to_fun(*s);
+
+                    let mut na = ws.new_atom();
+                    for a in f.iter() {
+                        a.rename_no_norm(state_map, ws, &mut na);
+                        nf.add_arg(na.as_view());
+                    }
+                } else {
+                    out.set_from_view(self);
+                }
+            }
+            AtomView::Pow(p) => {
+                let (b, e) = p.get_base_exp();
+
+                let mut nb = ws.new_atom();
+                b.rename_no_norm(state_map, ws, &mut nb);
+                let mut ne = ws.new_atom();
+                e.rename_no_norm(state_map, ws, &mut ne);
+
+                out.to_pow(nb.as_view(), ne.as_view());
+            }
+            AtomView::Mul(m) => {
+                let nm = out.to_mul();
+
+                let mut na = ws.new_atom();
+                for a in m.iter() {
+                    a.rename_no_norm(state_map, ws, &mut na);
+                    nm.extend(na.as_view());
+                }
+            }
+            AtomView::Add(add) => {
+                let nm = out.to_add();
+
+                let mut na = ws.new_atom();
+                for a in add.iter() {
+                    a.rename_no_norm(state_map, ws, &mut na);
+                    nm.extend(na.as_view());
+                }
+            }
+        }
+    }
+}
+
+impl PartialEq<AtomView<'_>> for AtomView<'_> {
+    #[inline(always)]
+    fn eq(&self, other: &AtomView) -> bool {
+        self.get_data() == other.get_data()
     }
 }
 
@@ -1228,9 +1406,14 @@ impl<'a> Iterator for ListIterator<'a> {
                 NUM_ID | VAR_ID => {
                     self.data = self.data.skip_rational();
                 }
-                FUN_ID | MUL_ID | ADD_ID => {
+                FUN_ID | MUL_ID => {
                     let n_size = self.data.get_u32_le();
                     self.data.advance(n_size as usize);
+                }
+                ADD_ID => {
+                    let (_, size, np) = self.data.get_frac_u64();
+                    self.data = np;
+                    self.data.advance(size as usize);
                 }
                 POW_ID => {
                     skip_count += 2;
@@ -1282,9 +1465,14 @@ impl<'a> ListSlice<'a> {
                 NUM_ID | VAR_ID => {
                     pos = pos.skip_rational();
                 }
-                FUN_ID | MUL_ID | ADD_ID => {
+                FUN_ID | MUL_ID => {
                     let n_size = pos.get_u32_le();
                     pos.advance(n_size as usize);
+                }
+                ADD_ID => {
+                    let (_, size, np) = pos.get_frac_u64();
+                    pos = np;
+                    pos.advance(size as usize);
                 }
                 POW_ID => {
                     skip_count += 2;

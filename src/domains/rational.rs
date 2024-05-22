@@ -383,8 +383,8 @@ impl Rational {
         }
 
         let k = &(max_denominator - &q0) / &q1;
-        let bound1 = (p0 + &(&k * &p1), &q0 + &(&k * &q1)).into();
-        let bound2 = (p1, q1).into();
+        let bound1: Rational = (p0 + &(&k * &p1), &q0 + &(&k * &q1)).into();
+        let bound2: Rational = (p1, q1).into();
 
         let res = if (&bound2 - self).abs() <= (&bound1 - self).abs() {
             bound2
@@ -803,6 +803,12 @@ impl PartialOrd for Rational {
         let b = &self.denominator() * &other.numerator();
 
         a.partial_cmp(&b)
+    }
+}
+
+impl Ord for Rational {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap()
     }
 }
 

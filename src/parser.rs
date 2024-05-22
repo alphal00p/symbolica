@@ -7,10 +7,10 @@ use smallvec::SmallVec;
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
+    atom::Atom,
     coefficient::ConvertToRing,
     domains::{integer::Integer, Ring},
     poly::{polynomial::MultivariatePolynomial, Exponent, Variable},
-    representations::Atom,
     state::{State, Workspace},
 };
 
@@ -117,11 +117,23 @@ impl Operator {
     }
 
     #[inline]
-    pub fn right_associative(&self) -> bool {
+    pub fn left_associative(&self) -> bool {
         match self {
             Operator::Mul => true,
             Operator::Add => true,
             Operator::Pow => false,
+            Operator::Argument => true,
+            Operator::Neg => true,
+            Operator::Inv => true,
+        }
+    }
+
+    #[inline]
+    pub fn right_associative(&self) -> bool {
+        match self {
+            Operator::Mul => true,
+            Operator::Add => true,
+            Operator::Pow => true,
             Operator::Argument => true,
             Operator::Neg => true,
             Operator::Inv => true,
@@ -244,7 +256,7 @@ impl Token {
 
             if let Token::Op(ml, mr, o2, mut args2) = other {
                 debug_assert!(!ml && !mr);
-                if *o1 == o2 {
+                if *o1 == o2 && o2.left_associative() {
                     // add from the left by swapping and then extending from the right
                     std::mem::swap(args, &mut args2);
                     args.append(&mut args2);
@@ -340,16 +352,22 @@ impl Token {
 
     /// Parse the token into an atom.
     pub fn to_atom(&self, workspace: &Workspace) -> Result<Atom, String> {
-        let mut atom = Atom::default();
+        let mut atom = workspace.new_atom();
 
-        let mut state = State::get_global_state().write().unwrap();
-        self.to_atom_with_output(&mut state, workspace, &mut atom)?;
+        {
+            let mut state = State::get_global_state().write().unwrap();
+            // do not normalize to prevent potential deadlocks
+            self.to_atom_with_output_no_norm(&mut state, workspace, &mut atom)?;
+        }
 
-        Ok(atom)
+        let mut out = Atom::new();
+        atom.as_view().normalize(workspace, &mut out);
+
+        Ok(out)
     }
 
     /// Parse the token into the atom `out`.
-    fn to_atom_with_output(
+    fn to_atom_with_output_no_norm(
         &self,
         state: &mut State,
         workspace: &Workspace,
@@ -367,41 +385,35 @@ impl Token {
             }
             Token::Op(_, _, op, args) => match op {
                 Operator::Mul => {
-                    let mut mul_h = workspace.new_atom();
-                    let mul = mul_h.to_mul();
+                    let mul = out.to_mul();
 
                     let mut atom = workspace.new_atom();
                     for a in args {
-                        a.to_atom_with_output(state, workspace, &mut atom)?;
+                        a.to_atom_with_output_no_norm(state, workspace, &mut atom)?;
                         mul.extend(atom.as_view());
                     }
-
-                    mul_h.as_view().normalize(workspace, out);
                 }
                 Operator::Add => {
-                    let mut add_h = workspace.new_atom();
-                    let add = add_h.to_add();
+                    let add = out.to_add();
 
                     let mut atom = workspace.new_atom();
                     for a in args {
-                        a.to_atom_with_output(state, workspace, &mut atom)?;
+                        a.to_atom_with_output_no_norm(state, workspace, &mut atom)?;
                         add.extend(atom.as_view());
                     }
-
-                    add_h.as_view().normalize(workspace, out);
                 }
                 Operator::Pow => {
                     // pow is right associative
                     args.last()
                         .unwrap()
-                        .to_atom_with_output(state, workspace, out)?;
+                        .to_atom_with_output_no_norm(state, workspace, out)?;
                     for a in args.iter().rev().skip(1) {
                         let mut cur_base = workspace.new_atom();
-                        a.to_atom_with_output(state, workspace, &mut cur_base)?;
+                        a.to_atom_with_output_no_norm(state, workspace, &mut cur_base)?;
 
                         let mut pow_h = workspace.new_atom();
                         pow_h.to_pow(cur_base.as_view(), out.as_view());
-                        pow_h.as_view().normalize(workspace, out);
+                        out.set_from_view(&pow_h.as_view());
                     }
                 }
                 Operator::Argument => return Err("Unexpected argument operator".into()),
@@ -409,27 +421,23 @@ impl Token {
                     debug_assert!(args.len() == 1);
 
                     let mut base = workspace.new_atom();
-                    args[0].to_atom_with_output(state, workspace, &mut base)?;
+                    args[0].to_atom_with_output_no_norm(state, workspace, &mut base)?;
 
                     let num = workspace.new_num(-1);
 
-                    let mut mul_h = workspace.new_atom();
-                    let mul = mul_h.to_mul();
+                    let mul = out.to_mul();
                     mul.extend(base.as_view());
                     mul.extend(num.as_view());
-                    mul_h.as_view().normalize(workspace, out);
                 }
                 Operator::Inv => {
                     debug_assert!(args.len() == 1);
 
                     let mut base = workspace.new_atom();
-                    args[0].to_atom_with_output(state, workspace, &mut base)?;
+                    args[0].to_atom_with_output_no_norm(state, workspace, &mut base)?;
 
                     let num = workspace.new_num(-1);
 
-                    let mut pow_h = workspace.new_atom();
-                    pow_h.to_pow(base.as_view(), num.as_view());
-                    pow_h.as_view().normalize(workspace, out);
+                    out.to_pow(base.as_view(), num.as_view());
                 }
             },
             Token::Fn(_, args) => {
@@ -438,15 +446,12 @@ impl Token {
                     _ => unreachable!(),
                 };
 
-                let mut fun_h = workspace.new_atom();
-                let fun = fun_h.to_fun(state.get_symbol_impl(name));
+                let fun = out.to_fun(state.get_symbol_impl(name));
                 let mut atom = workspace.new_atom();
                 for a in args.iter().skip(1) {
-                    a.to_atom_with_output(state, workspace, &mut atom)?;
+                    a.to_atom_with_output_no_norm(state, workspace, &mut atom)?;
                     fun.add_arg(atom.as_view());
                 }
-
-                fun_h.as_view().normalize(workspace, out);
             }
             x => return Err(format!("Unexpected token {}", x)),
         }
@@ -1146,5 +1151,60 @@ impl Token {
         } else {
             (last_pos, poly)
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use crate::{atom::Atom, domains::integer::Z, parser::Token, state::State};
+
+    #[test]
+    fn pow() {
+        let input = Atom::parse("v1^v2^v3^3").unwrap();
+        assert_eq!(format!("{}", input), "v1^v2^v3^3");
+
+        let input = Atom::parse("(v1^v2)^v3").unwrap();
+        assert_eq!(format!("{}", input), "(v1^v2)^v3");
+    }
+
+    #[test]
+    fn unary() {
+        let input = Atom::parse("-x^z").unwrap();
+        assert_eq!(format!("{}", input), "-x^z");
+
+        let input = Atom::parse("(-x)^z").unwrap();
+        assert_eq!(format!("{}", input), "(-x)^z");
+    }
+
+    #[test]
+    fn liberal() {
+        let input = Atom::parse(
+            "89233_21837281 x   
+            ^2 / y + 5",
+        )
+        .unwrap();
+        let res = Atom::parse("8923321837281*x^2*y^-1+5").unwrap();
+        assert_eq!(input, res);
+    }
+
+    #[test]
+    fn poly() {
+        let var_names = ["v1".into(), "v2".into()];
+        let var_map = Arc::new(vec![
+            State::get_symbol("v1").into(),
+            State::get_symbol("v2").into(),
+        ]);
+        let (rest, input) =
+            Token::parse_polynomial::<_, u8>("#ABC*v1^2*v2+5".as_bytes(), &var_map, &var_names, &Z);
+
+        assert!(rest.is_empty());
+        assert_eq!(
+            input,
+            Atom::parse("5+2748*v1^2*v2")
+                .unwrap()
+                .to_polynomial(&Z, var_map.clone().into())
+        );
     }
 }

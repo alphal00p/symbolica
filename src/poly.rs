@@ -4,6 +4,7 @@ pub mod gcd;
 pub mod groebner;
 pub mod polynomial;
 pub mod resultant;
+pub mod series;
 pub mod univariate;
 
 use std::borrow::Cow;
@@ -18,6 +19,7 @@ use ahash::HashMap;
 use smallvec::{smallvec, SmallVec};
 use smartstring::{LazyCompact, SmartString};
 
+use crate::atom::{Atom, AtomView, Symbol};
 use crate::coefficient::{Coefficient, CoefficientView, ConvertToRing};
 use crate::domains::factorized_rational_polynomial::{
     FactorizedRationalPolynomial, FromNumeratorAndFactorizedDenominator,
@@ -26,7 +28,6 @@ use crate::domains::integer::Integer;
 use crate::domains::rational_polynomial::{FromNumeratorAndDenominator, RationalPolynomial};
 use crate::domains::{EuclideanDomain, Ring};
 use crate::parser::{Operator, Token};
-use crate::representations::{Atom, AtomView, Symbol};
 use crate::state::{State, Workspace};
 use crate::utils;
 
@@ -391,6 +392,44 @@ impl Variable {
             Variable::Temporary(t) => format!("_TMP_{}", *t),
             Variable::Function(_, a) | Variable::Other(a) => format!("{}", a),
         }
+    }
+
+    pub fn to_atom(&self) -> Atom {
+        match self {
+            Variable::Symbol(s) => Atom::new_var(*s),
+            Variable::Function(_, a) | Variable::Other(a) => a.as_ref().clone(),
+            Variable::Temporary(_) => panic!("Cannot convert a temporary variable to an atom"),
+        }
+    }
+
+    /// Check if the symbol `symbol` appears at most once in the variable map.
+    /// For example, `[x,f(x)]` is not independent in `x`, but `[x,y]` is.
+    pub fn is_independent_symbol(variables: &[Variable], symbol: Symbol) -> bool {
+        let mut seen = false;
+
+        for v in variables {
+            match v {
+                Variable::Symbol(s) => {
+                    if *s == symbol {
+                        if seen {
+                            return false;
+                        }
+                        seen = true;
+                    }
+                }
+                Variable::Function(_, f) | Variable::Other(f) => {
+                    if f.contains_symbol(symbol) {
+                        if seen {
+                            return false;
+                        }
+                        seen = true;
+                    }
+                }
+                Variable::Temporary(_) => {}
+            }
+        }
+
+        true
     }
 }
 
