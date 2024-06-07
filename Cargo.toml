@@ -21,8 +21,8 @@ inherits = "dev"
 opt-level = 3
 
 [lib]
-#crate-type = ["lib"]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["lib"]
+# crate-type = ["cdylib", "rlib"]
 name = "symbolica"
 
 [features]
@@ -34,6 +34,9 @@ mathematica_api = ["wolfram-library-link"]
 python_api = ["pyo3", "self_cell", "bincode"]
 # build a module that is independent of the specific Python version
 python_abi3 = ["pyo3/abi3", "pyo3/abi3-py37"]
+
+[build-dependencies]
+pyo3-build-config = "*"
 
 [dependencies.pyo3]
 features = ["extension-module", "multiple-pymethods", "abi3"]
@@ -53,6 +56,7 @@ bytes = "1.5"
 colored = "2.1"
 dyn-clone = "1.0"
 once_cell = "1.19"
+pyo3-build-config = "0.21.2"
 rand = "0.8.5"
 rand_xoshiro = "0.6"
 rayon = "1.8"
