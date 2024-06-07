@@ -5,6 +5,7 @@ Symbolica Python API.
 from __future__ import annotations
 from enum import Enum
 from typing import Any, Callable, overload, Iterator, Optional, Sequence, Tuple, List
+from decimal import Decimal
 
 
 def get_version() -> str:
@@ -126,7 +127,7 @@ class Expression:
         Examples
         --------
         Define a regular symbol and use it as a variable:
-        >>> f = Expression.symbol('x')
+        >>> x = Expression.symbol('x')
         >>> e = x**2 + 5
         >>> print(e)
         x**2 + 5
@@ -813,12 +814,6 @@ class Expression:
         >>> print(a)
         """
 
-    def to_rational_polynomial_small_exponent(
-        self,
-        vars: Optional[Sequence[Expression]] = None,
-    ) -> RationalPolynomial:
-        """Similar to `to_rational_polynomial()`, but the power of each variable is limited to 255."""
-
     def match(
         self,
         lhs: Transformer | Expression | int,
@@ -828,7 +823,7 @@ class Expression:
     ) -> MatchIterator:
         """
         Return an iterator over the pattern `self` matching to `lhs`.
-        Restrictions on pattern can be supplied through `cond`.
+        Restrictions on the pattern can be supplied through `cond`.
 
         The `level_range` specifies the `[min,max]` level at which the pattern is allowed to match.
         The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree,
@@ -843,6 +838,25 @@ class Expression:
         >>> for match in e.match(f(x_)):
         >>>    for map in match:
         >>>        print(map[0],'=', map[1])
+        """
+
+    def matches(
+        self,
+        lhs: Transformer | Expression | int,
+        cond: Optional[PatternRestriction] = None,
+        level_range: Optional[Tuple[int, Optional[int]]] = None,
+        level_is_tree_depth: Optional[bool] = False,
+    ) -> bool:
+        """
+        Test whether the pattern is found in the expression.
+        Restrictions on the pattern can be supplied through `cond`.
+
+        Examples
+        --------
+
+        >>> f = Expression.symbol('f')
+        >>> if f(1).matches(f(2)):
+        >>>    print('match')
         """
 
     def replace(
@@ -971,6 +985,28 @@ class Expression:
         >>> f = Expression.symbol('f')
         >>> e = Expression.parse('cos(x)')*3 + f(x,2)
         >>> print(e.evaluate({x: 1}, {f: lambda args: args[0]+args[1]}))
+        """
+
+    def evaluate_with_prec(
+        self,
+        constants: dict[Expression, float | str | Decimal],
+        funs: dict[Expression, Callable[[Sequence[Decimal]], float | str | Decimal]],
+        decimal_digit_precision: int
+    ) -> Decimal:
+        """Evaluate the expression, using a map of all the constants and
+        user functions using arbitrary precision arithmetic.
+        The user has to specify the number of decimal digits of precision
+        and provide all input numbers as floats, strings or `Decimal`.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> from decimal import Decimal, getcontext
+        >>> x = Expression.symbols('x', 'f')
+        >>> e = Expression.parse('cos(x)')*3 + f(x, 2)
+        >>> getcontext().prec = 100
+        >>> a = e.evaluate_with_prec({x: Decimal('1.123456789')}, {
+        >>>                         f: lambda args: args[0] + args[1]}, 100)
         """
 
     def evaluate_complex(
@@ -1452,21 +1488,33 @@ class Series:
     Examples
     --------
     >>> x = Expression.symbol('x')
-    >>> s = Expression.parse("(1-cos(x))/sin(x)").series(x, 0, 4)
+    >>> s = Expression.parse("(1-cos(x))/sin(x)").series(x, 0, 4) * x
     >>> print(s)
     """
 
-    def __add__(self, other: Series) -> Series:
+    def __add__(self, other: Series | Expression) -> Series:
+        """Add another series or expression to this series, returning the result."""
+
+    def __radd__(self, other: Expression) -> Series:
         """Add two series together, returning the result."""
 
-    def __sub__(self, other: Series) -> Series:
+    def __sub__(self, other: Series | Expression) -> Series:
         """Subtract `other` from `self`, returning the result."""
 
-    def __mul__(self, other: Series) -> Series:
+    def __rsub__(self, other: Expression) -> Series:
+        """Subtract `self` from `other`, returning the result."""
+
+    def __mul__(self, other: Series | Expression) -> Series:
+        """Multiply another series or expression to this series, returning the result."""
+
+    def __rmul__(self, other: Expression) -> Series:
         """Multiply two series together, returning the result."""
 
-    def __truediv__(self, other: Series) -> Series:
+    def __truediv__(self, other: Series | Expression) -> Series:
         """Divide `self` by `other`, returning the result."""
+
+    def __rtruediv__(self, other: Expression) -> Series:
+        """Divide `other` by `self`, returning the result."""
 
     def __pow__(self, exp: int) -> Series:
         """Raise the series to the power of `exp`, returning the result."""
@@ -1492,6 +1540,18 @@ class Series:
     def spow(self, exp: Series) -> Series:
         """Raise the series to the power of `exp`, returning the result."""
 
+    def shift(self, e: int) -> Series:
+        """Shift the series by `e` units of the ramification."""
+
+    def get_ramification(self) -> int:
+        """Get the ramification."""
+
+    def get_trailing_exponent(self) -> Tuple[int, int]:
+        """Get the trailing exponent; the exponent of the first non-zero term."""
+
+    def get_absolute_order(self) -> Tuple[int, int]:
+        """Get the absolute order."""
+
     def to_expression(self) -> Expression:
         """Convert the series to an expression"""
 
@@ -1516,19 +1576,28 @@ class TermStreamer:
         """Add another term streamer to this one."""
 
     def get_byte_size(self) -> int:
-        """Get the byte size of the term streamer."""
+        """Get the byte size of the term stream."""
+
+    def get_num_terms(self) -> int:
+        """Get the number of terms in the stream."""
+
+    def fits_in_memory(self) -> bool:
+        """Check if the term stream fits in memory."""
 
     def push(self, expr: Expression) -> None:
-        """Push an expresssion to the term streamer."""
+        """Push an expresssion to the term stream."""
 
     def normalize(self) -> None:
-        """Sort and fuse all terms in the streamer."""
+        """Sort and fuse all terms in the stream."""
 
     def to_expression(self) -> Expression:
         """Convert the term stream into an expression. This may exceed the available memory."""
 
     def map(self, f: Transformer) -> TermStreamer:
-        """Apply a transformer to all terms in the streamer."""
+        """Apply a transformer to all terms in the stream."""
+
+    def map_single_thread(self, f: Transformer) -> TermStreamer:
+        """Apply a transformer to all terms in the stream using a single thread."""
 
 
 class MatchIterator:
@@ -1629,6 +1698,9 @@ class Polynomial:
     def quot_rem(self, rhs: Polynomial) -> Tuple[Polynomial, Polynomial]:
         """Divide `self` by `rhs`, returning the quotient and remainder."""
 
+    def __mod__(self, rhs: Polynomial) -> Polynomial:
+        """Compute the remainder of the division of `self` by `rhs`."""
+
     def __neg__(self) -> Polynomial:
         """Negate the polynomial."""
 
@@ -1713,8 +1785,8 @@ class Polynomial:
         >>> print(p.content())
         """
 
-    def coefficient_list(self, x: Expression) -> list[Tuple[int, Polynomial]]:
-        """Get the coefficient list in `x`.
+    def coefficient_list(self, xs: Optional[Expression | Sequence[Expression]]) -> list[Tuple[list[int], Polynomial]]:
+        """Get the coefficient list, optionally in the variables `xs`.
 
         Examples
         --------
@@ -1853,6 +1925,9 @@ class IntegerPolynomial:
     def quot_rem(self, rhs: IntegerPolynomial) -> Tuple[IntegerPolynomial, IntegerPolynomial]:
         """Divide `self` by `rhs`, returning the quotient and remainder."""
 
+    def __mod__(self, rhs: IntegerPolynomial) -> IntegerPolynomial:
+        """Compute the remainder of the division of `self` by `rhs`."""
+
     def __neg__(self) -> IntegerPolynomial:
         """Negate the polynomial."""
 
@@ -1913,8 +1988,8 @@ class IntegerPolynomial:
         >>> print(p.content())
         """
 
-    def coefficient_list(self, x: Expression) -> list[Tuple[int, IntegerPolynomial]]:
-        """Get the coefficient list in `x`.
+    def coefficient_list(self, xs: Optional[Expression | Sequence[Expression]]) -> list[Tuple[list[int], IntegerPolynomial]]:
+        """Get the coefficient list, optionally in the variables `xs`.
 
         Examples
         --------
@@ -2030,6 +2105,9 @@ class FiniteFieldPolynomial:
     def quot_rem(self, rhs: FiniteFieldPolynomial) -> Tuple[FiniteFieldPolynomial, FiniteFieldPolynomial]:
         """Divide `self` by `rhs`, returning the quotient and remainder."""
 
+    def __mod__(self, rhs: FiniteFieldPolynomial) -> FiniteFieldPolynomial:
+        """Compute the remainder of the division of `self` by `rhs`."""
+
     def __neg__(self) -> FiniteFieldPolynomial:
         """Negate the polynomial."""
 
@@ -2110,8 +2188,8 @@ class FiniteFieldPolynomial:
         >>> print(p.content())
         """
 
-    def coefficient_list(self, x: Expression) -> list[Tuple[int, FiniteFieldPolynomial]]:
-        """Get the coefficient list in `x`.
+    def coefficient_list(self, xs: Optional[Expression | Sequence[Expression]]) -> list[Tuple[list[int], FiniteFieldPolynomial]]:
+        """Get the coefficient list, optionally in the variables `xs`.
 
         Examples
         --------
@@ -2236,93 +2314,6 @@ class RationalPolynomial:
         """
 
     def apart(self, x: Expression) -> List[RationalPolynomial]:
-        """Compute the partial fraction decomposition in `x`.
-
-        Examples
-        --------
-
-        >>> from symbolica import Expression
-        >>> x = Expression.symbol('x')
-        >>> p = Expression.parse('1/((x+y)*(x^2+x*y+1)(x+1))').to_rational_polynomial()
-        >>> for pp in p.apart(x):
-        >>>     print(pp)
-        """
-
-
-class RationalPolynomialSmallExponent:
-    """A Symbolica rational polynomial with variable powers limited to 255."""
-
-    @classmethod
-    def parse(_cls, input: str, vars: Sequence[str]) -> RationalPolynomial:
-        """
-        Parse a rational polynomial from a string.
-        The list of all the variables must be provided.
-
-        If this requirements is too strict, use `Expression.to_polynomial()` instead.
-
-        Examples
-        --------
-        >>> e = RationalPolynomialSmallExponent.parse('(3/4*x^2+y+y*4)/(1+x)', ['x', 'y'])
-
-        Raises
-        ------
-        ValueError
-            If the input is not a valid Symbolica rational polynomial.
-        """
-
-    def __copy__(self) -> RationalPolynomialSmallExponent:
-        """Copy the rational polynomial."""
-
-    def __str__(self) -> str:
-        """Print the rational polynomial in a human-readable format."""
-
-    def to_latex(self) -> str:
-        """Convert the rational polynomial into a LaTeX string."""
-
-    def get_var_list(self) -> Sequence[Expression]:
-        """Get the list of variables in the internal ordering of the polynomial."""
-
-    def __add__(
-        self, rhs: RationalPolynomialSmallExponent
-    ) -> RationalPolynomialSmallExponent:
-        """Add two rational polynomials `self` and `rhs`, returning the result."""
-
-    def __sub__(
-        self, rhs: RationalPolynomialSmallExponent
-    ) -> RationalPolynomialSmallExponent:
-        """Subtract rational polynomials `rhs` from `self`, returning the result."""
-
-    def __mul__(
-        self, rhs: RationalPolynomialSmallExponent
-    ) -> RationalPolynomialSmallExponent:
-        """Multiply two rational polynomials `self` and `rhs`, returning the result."""
-
-    def __truediv__(
-        self, rhs: RationalPolynomialSmallExponent
-    ) -> RationalPolynomialSmallExponent:
-        """Divide the rational polynomial `self` by `rhs` if possible, returning the result."""
-
-    def __neg__(self) -> RationalPolynomialSmallExponent:
-        """Negate the rational polynomial."""
-
-    def gcd(
-        self, rhs: RationalPolynomialSmallExponent
-    ) -> RationalPolynomialSmallExponent:
-        """Compute the greatest common divisor (GCD) of two rational polynomials."""
-
-    def to_expression(self) -> Expression:
-        """ Convert the polynomial to an expression.
-
-        Examples
-        --------
-
-        >>> from symbolica import Expression
-        >>> e = Expression.parse('(x*y+2*x+x^2)/(x^7+y+1)')
-        >>> p = e.to_polynomial()
-        >>> print((e - p.to_expression()).expand())
-        """
-
-    def apart(self, x: Expression) -> List[RationalPolynomialSmallExponent]:
         """Compute the partial fraction decomposition in `x`.
 
         Examples

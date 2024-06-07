@@ -23,7 +23,7 @@ use crate::{
     atom::{Atom, Symbol},
     coefficient::Coefficient,
     domains::finite_field::FiniteFieldCore,
-    LicenseManager, LICENSE_MANAGER,
+    LicenseManager,
 };
 
 pub const EXPORT_FORMAT_VERSION: u16 = 1;
@@ -96,7 +96,7 @@ impl State {
     ];
 
     fn new() -> State {
-        LICENSE_MANAGER.get_or_init(LicenseManager::new).check();
+        LicenseManager::check();
 
         let mut state = State {
             str_to_id: HashMap::new(),
@@ -160,9 +160,10 @@ impl State {
     ///
     /// Example:
     /// ```
-    /// State::get_symbol_with_attributes("f", vec![FunctionAttribute::Symmetric]).unwrap();
+    /// # use symbolica::state::{State, FunctionAttribute};
+    /// State::get_symbol_with_attributes("f", &[FunctionAttribute::Symmetric]).unwrap();
     /// unsafe { State::reset(); }
-    /// State::get_symbol_with_attributes("f", vec![FunctionAttribute::Antisymmetric]).unwrap();
+    /// State::get_symbol_with_attributes("f", &[FunctionAttribute::Antisymmetric]).unwrap();
     /// ```
     pub unsafe fn reset() {
         let mut state = STATE.write().unwrap();
@@ -362,7 +363,7 @@ impl State {
 
         for (s, n) in State::symbol_iter() {
             dest.write_u32::<LittleEndian>(n.as_bytes().len() as u32)?;
-            dest.write(n.as_bytes())?;
+            dest.write_all(n.as_bytes())?;
             dest.write_u8(s.get_wildcard_level())?;
             dest.write_u8(s.is_symmetric() as u8)?;
             dest.write_u8(s.is_antisymmetric() as u8)?;
@@ -574,7 +575,9 @@ impl Workspace {
 
     /// Get a thread-local workspace.
     #[inline]
-    pub const fn get_local() -> &'static LocalKey<ManuallyDrop<Workspace>> {
+    pub fn get_local() -> &'static LocalKey<ManuallyDrop<Workspace>> {
+        LicenseManager::check();
+
         &WORKSPACE
     }
 

@@ -1,6 +1,8 @@
 mod coefficient;
 pub mod representation;
 
+use representation::{InlineNum, InlineVar};
+
 use crate::{
     coefficient::Coefficient,
     parser::Token,
@@ -200,6 +202,18 @@ pub trait AsAtomView<'a>: Sized {
 impl<'a> AsAtomView<'a> for AtomView<'a> {
     fn as_atom_view(self) -> AtomView<'a> {
         self
+    }
+}
+
+impl<'a> AsAtomView<'a> for &'a InlineVar {
+    fn as_atom_view(self) -> AtomView<'a> {
+        self.as_view()
+    }
+}
+
+impl<'a> AsAtomView<'a> for &'a InlineNum {
+    fn as_atom_view(self) -> AtomView<'a> {
+        self.as_view()
     }
 }
 
@@ -457,7 +471,7 @@ impl Atom {
         Atom::default()
     }
 
-    /// Parse and atom from a string.
+    /// Parse an atom from a string.
     pub fn parse(input: &str) -> Result<Atom, String> {
         Workspace::get_local().with(|ws| Token::parse(input)?.to_atom(ws))
     }
@@ -625,7 +639,7 @@ impl Atom {
 /// #     state::{FunctionAttribute, State},
 /// # };
 /// # fn main() {
-/// let f_id = State::get_symbol_with_attributes("f", vec![FunctionAttribute::Symmetric]).unwrap();
+/// let f_id = State::get_symbol_with_attributes("f", &[FunctionAttribute::Symmetric]).unwrap();
 /// let fb = FunctionBuilder::new(f_id);
 /// let a = fb
 ///     .add_arg(&Atom::new_num(3))

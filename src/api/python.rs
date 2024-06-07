@@ -1,5 +1,6 @@
 use std::{
     borrow::Borrow,
+    f64::consts::LOG2_10,
     fs::File,
     hash::{Hash, Hasher},
     io::BufWriter,
@@ -14,10 +15,12 @@ use pyo3::{
     pyclass,
     pyclass::CompareOp,
     pyfunction, pymethods, pymodule,
+    sync::GILOnceCell,
     types::{PyBytes, PyComplex, PyLong, PyModule, PyTuple, PyType},
-    wrap_pyfunction, FromPyObject, IntoPy, PyErr, PyObject, PyRef, PyResult, Python,
+    wrap_pyfunction, FromPyObject, IntoPy, Py, PyErr, PyObject, PyRef, PyResult, Python,
+    ToPyObject,
 };
-use rug::Complete;
+use rug::{ops::CompleteRound, Complete};
 use self_cell::self_cell;
 use smallvec::SmallVec;
 use smartstring::{LazyCompact, SmartString};
@@ -71,7 +74,6 @@ fn symbolica(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PythonIntegerPolynomial>()?;
     m.add_class::<PythonFiniteFieldPolynomial>()?;
     m.add_class::<PythonRationalPolynomial>()?;
-    m.add_class::<PythonRationalPolynomialSmallExponent>()?;
     m.add_class::<PythonFiniteFieldRationalPolynomial>()?;
     m.add_class::<PythonMatrix>()?;
     m.add_class::<PythonNumericalIntegrator>()?;
@@ -91,7 +93,7 @@ fn symbolica(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(request_hobbyist_license, m)?)?;
     m.add_function(wrap_pyfunction!(request_trial_license, m)?)?;
     m.add_function(wrap_pyfunction!(request_sublicense, m)?)?;
-    m.add_function(wrap_pyfunction!(get_offline_license_key, m)?)?;
+    m.add_function(wrap_pyfunction!(get_license_key, m)?)?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
@@ -148,10 +150,12 @@ fn request_sublicense(
         .map_err(exceptions::PyConnectionError::new_err)
 }
 
-/// Get a license key for offline use, generated from a licensed Symbolica session. The key will remain valid for 24 hours.
+/// Get the license key for the account registered with the provided email address.
 #[pyfunction]
-fn get_offline_license_key() -> PyResult<String> {
-    LicenseManager::get_offline_license_key().map_err(exceptions::PyValueError::new_err)
+fn get_license_key(email: String) -> PyResult<()> {
+    LicenseManager::get_license_key(&email)
+        .map(|_| println!("A license key was sent to your e-mail address."))
+        .map_err(exceptions::PyConnectionError::new_err)
 }
 
 /// Specifies the type of the atom.
@@ -250,6 +254,21 @@ impl ConvertibleToPattern {
         match self {
             Self::Literal(l) => Ok(l.to_expression().expr.as_view().into_pattern().into()),
             Self::Pattern(e) => Ok(e),
+        }
+    }
+}
+
+#[derive(FromPyObject)]
+pub enum OneOrMultiple<T> {
+    One(T),
+    Multiple(Vec<T>),
+}
+
+impl<T> OneOrMultiple<T> {
+    pub fn to_iter(&self) -> impl Iterator<Item = &T> {
+        match self {
+            OneOrMultiple::One(a) => std::slice::from_ref(a).iter(),
+            OneOrMultiple::Multiple(m) => m.iter(),
         }
     }
 }
@@ -1175,12 +1194,85 @@ impl ConvertibleToExpression {
     }
 }
 
+pub struct PythonMultiPrecisionFloat(rug::Float);
+
+impl From<rug::Float> for PythonMultiPrecisionFloat {
+    fn from(f: rug::Float) -> Self {
+        PythonMultiPrecisionFloat(f)
+    }
+}
+
+static PYDECIMAL: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+
+fn get_decimal(py: Python) -> &Py<PyType> {
+    PYDECIMAL.get_or_init(py, || {
+        py.import("decimal")
+            .unwrap()
+            .getattr("Decimal")
+            .unwrap()
+            .extract()
+            .unwrap()
+    })
+}
+
+impl ToPyObject for PythonMultiPrecisionFloat {
+    fn to_object(&self, py: Python) -> PyObject {
+        get_decimal(py)
+            .as_ref(py)
+            .call1((self.0.to_string(),))
+            .expect("failed to call decimal.Decimal(value)")
+            .to_object(py)
+    }
+}
+
+impl<'a> FromPyObject<'a> for PythonMultiPrecisionFloat {
+    fn extract(ob: &'a pyo3::PyAny) -> PyResult<Self> {
+        if ob.is_instance(get_decimal(ob.py()).as_ref(ob.py()))? {
+            let a = ob.call_method0("__str__").unwrap().extract::<&str>()?;
+            Ok(rug::Float::parse(a)
+                .unwrap()
+                .complete((a.len() as f64 * LOG2_10).ceil() as u32)
+                .into())
+        } else if let Ok(a) = ob.extract::<&str>() {
+            // convert without loss of precision by setting the precision to the string length
+            Ok(rug::Float::parse(a)
+                .unwrap()
+                .complete((a.len() as f64 * LOG2_10).ceil() as u32)
+                .into())
+        } else if let Ok(a) = ob.extract::<f64>() {
+            Ok(rug::Float::with_val(53, a).into())
+        } else {
+            Err(exceptions::PyValueError::new_err(
+                "Not a valid multi-precision float",
+            ))
+        }
+    }
+}
+
 impl<'a> FromPyObject<'a> for Complex<f64> {
     fn extract(ob: &'a pyo3::PyAny) -> PyResult<Self> {
         if let Ok(a) = ob.extract::<f64>() {
             Ok(Complex::new(a, 0.))
         } else if let Ok(a) = ob.extract::<&PyComplex>() {
             Ok(Complex::new(a.real(), a.imag()))
+        } else {
+            Err(exceptions::PyValueError::new_err(
+                "Not a valid complex number",
+            ))
+        }
+    }
+}
+
+impl<'a> FromPyObject<'a> for Complex<rug::Float> {
+    fn extract(ob: &'a pyo3::PyAny) -> PyResult<Self> {
+        if let Ok(a) = ob.extract::<PythonMultiPrecisionFloat>() {
+            let zero = rug::Float::new(a.0.prec());
+            Ok(Complex::new(a.0, zero))
+        } else if let Ok(a) = ob.extract::<&PyComplex>() {
+            Ok(Complex::new(
+                rug::Float::with_val(53, a.real()).into(),
+                rug::Float::with_val(53, a.imag()).into(),
+            ))
         } else {
             Err(exceptions::PyValueError::new_err(
                 "Not a valid complex number",
@@ -1315,7 +1407,7 @@ impl PythonExpression {
     /// Examples
     /// --------
     /// Define a regular symbol and use it as a variable:
-    /// >>> f = Expression.symbol('x')
+    /// >>> x = Expression.symbol('x')
     /// >>> e = x**2 + 5
     /// >>> print(e)
     /// x**2 + 5
@@ -2397,7 +2489,6 @@ impl PythonExpression {
         Ok(b.into())
     }
 
-
     /// Expand the expression. Optionally, expand in `var` only.
     pub fn expand(&self, var: Option<ConvertibleToExpression>) -> PyResult<PythonExpression> {
         if let Some(var) = var {
@@ -2777,39 +2868,8 @@ impl PythonExpression {
         })
     }
 
-    /// Similar to [PythonExpression::to_rational_polynomial()], but the power of each variable limited to 255.
-    pub fn to_rational_polynomial_small_exponent(
-        &self,
-        vars: Option<Vec<PythonExpression>>,
-    ) -> PyResult<PythonRationalPolynomialSmallExponent> {
-        let mut var_map = vec![];
-        if let Some(vm) = vars {
-            for v in vm {
-                match v.expr.as_view() {
-                    AtomView::Var(v) => var_map.push(v.get_symbol().into()),
-                    e => {
-                        Err(exceptions::PyValueError::new_err(format!(
-                            "Expected variable instead of {}",
-                            e
-                        )))?;
-                    }
-                }
-            }
-        }
-
-        let var_map = if var_map.is_empty() {
-            None
-        } else {
-            Some(Arc::new(var_map))
-        };
-
-        Ok(PythonRationalPolynomialSmallExponent {
-            poly: self.expr.to_rational_polynomial(&Q, &Z, var_map),
-        })
-    }
-
     /// Return an iterator over the pattern `self` matching to `lhs`.
-    /// Restrictions on pattern can be supplied through `cond`.
+    /// Restrictions on the pattern can be supplied through `cond`.
     ///
     /// Examples
     /// --------
@@ -2847,6 +2907,39 @@ impl PythonExpression {
                 PatternAtomTreeIterator::new(lhs, target.as_view(), res, settings)
             },
         ))
+    }
+
+    /// Test whether the pattern is found in the expression.
+    /// Restrictions on the pattern can be supplied through `cond`.
+    ///
+    /// Examples
+    /// --------
+    ///
+    /// >>> f = Expression.symbol('f')
+    /// >>> if f(1).matches(f(2)):
+    /// >>>    print('match')
+    pub fn matches(
+        &self,
+        lhs: ConvertibleToPattern,
+        cond: Option<PythonPatternRestriction>,
+        level_range: Option<(usize, Option<usize>)>,
+        level_is_tree_depth: Option<bool>,
+    ) -> PyResult<bool> {
+        let pat = lhs.to_pattern()?.expr;
+        let conditions = cond
+            .map(|r| r.condition.clone())
+            .unwrap_or(Condition::default());
+        let settings = MatchSettings {
+            level_range: level_range.unwrap_or((0, None)),
+            level_is_tree_depth: level_is_tree_depth.unwrap_or(false),
+            ..MatchSettings::default()
+        };
+
+        Ok(
+            PatternAtomTreeIterator::new(&pat, self.expr.as_view(), &conditions, &settings)
+                .next()
+                .is_some(),
+        )
     }
 
     /// Return an iterator over the replacement of the pattern `self` on `lhs` by `rhs`.
@@ -3136,8 +3229,93 @@ impl PythonExpression {
 
         Ok(self
             .expr
-            .as_view()
-            .evaluate(&constants, &functions, &mut cache))
+            .evaluate(|x| x.into(), &constants, &functions, &mut cache))
+    }
+
+    /// Evaluate the expression, using a map of all the constants and
+    /// user functions using arbitrary precision arithmetic.
+    /// The user has to specify the number of decimal digits of precision
+    /// and provide all input numbers as floats, strings or `decimal`.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import *
+    /// >>> from decimal import Decimal, getcontext
+    /// >>> x = Expression.symbols('x', 'f')
+    /// >>> e = Expression.parse('cos(x)')*3 + f(x, 2)
+    /// >>> getcontext().prec = 100
+    /// >>> a = e.evaluate_with_prec({x: Decimal('1.123456789')}, {
+    /// >>>                         f: lambda args: args[0] + args[1]}, 100)
+    pub fn evaluate_with_prec(
+        &self,
+        constants: HashMap<PythonExpression, PythonMultiPrecisionFloat>,
+        functions: HashMap<Variable, PyObject>,
+        decimal_digit_precision: u32,
+        py: Python,
+    ) -> PyResult<PyObject> {
+        let prec = (decimal_digit_precision as f64 * std::f64::consts::LOG2_10).ceil() as u32;
+
+        let mut cache = HashMap::default();
+
+        let constants: HashMap<AtomView, rug::Float> = constants
+            .iter()
+            .map(|(k, v)| {
+                Ok((k.expr.as_view(), {
+                    let mut vv = v.0.clone();
+                    vv.set_prec(prec);
+                    vv
+                }))
+            })
+            .collect::<PyResult<_>>()?;
+
+        let functions = functions
+            .into_iter()
+            .map(|(k, v)| {
+                let id = if let Variable::Symbol(v) = k {
+                    v
+                } else {
+                    Err(exceptions::PyValueError::new_err(format!(
+                        "Expected function name instead of {}",
+                        k
+                    )))?
+                };
+
+                Ok((
+                    id,
+                    EvaluationFn::new(Box::new(move |args: &[rug::Float], _, _, _| {
+                        Python::with_gil(|py| {
+                            let mut vv = v
+                                .call(
+                                    py,
+                                    (args
+                                        .iter()
+                                        .map(|x| PythonMultiPrecisionFloat(x.clone()).to_object(py))
+                                        .collect::<Vec<_>>(),),
+                                    None,
+                                )
+                                .expect("Bad callback function")
+                                .extract::<PythonMultiPrecisionFloat>(py)
+                                .expect("Function does not return a string")
+                                .0;
+                            vv.set_prec(prec);
+                            vv
+                        })
+                    })),
+                ))
+            })
+            .collect::<PyResult<_>>()?;
+
+        let a: PythonMultiPrecisionFloat = self
+            .expr
+            .evaluate(
+                |x| x.to_multi_prec_float(prec),
+                &constants,
+                &functions,
+                &mut cache,
+            )
+            .into();
+
+        Ok(a.to_object(py))
     }
 
     /// Evaluate the expression, using a map of all the variables and
@@ -3197,8 +3375,7 @@ impl PythonExpression {
 
         let r = self
             .expr
-            .as_view()
-            .evaluate(&constants, &functions, &mut cache);
+            .evaluate(|x| x.into(), &constants, &functions, &mut cache);
         Ok(PyComplex::from_doubles(py, r.re, r.im))
     }
 }
@@ -3269,6 +3446,12 @@ impl PythonReplacement {
     }
 }
 
+#[derive(FromPyObject)]
+pub enum SeriesOrExpression {
+    Series(PythonSeries),
+    Expression(PythonExpression),
+}
+
 /// A series expansion class.
 ///
 /// Supports standard arithmetic operations, such
@@ -3280,34 +3463,84 @@ impl PythonReplacement {
 /// >>> s = Expression.parse("(1-cos(x))/sin(x)").series(x, 0, 4)
 /// >>> print(s)
 #[pyclass(name = "Series", module = "symbolica")]
+#[derive(Clone)]
 pub struct PythonSeries {
     pub series: Series<AtomField>,
 }
 
 #[pymethods]
 impl PythonSeries {
-    /// Add this series to `other`, returning the result.
-    pub fn __add__(&self, rhs: &Self) -> PyResult<Self> {
+    /// Add this series to `rhs`, returning the result.
+    pub fn __add__(&self, rhs: SeriesOrExpression) -> PyResult<Self> {
+        match rhs {
+            SeriesOrExpression::Series(rhs) => Ok(Self {
+                series: &self.series + &rhs.series,
+            }),
+            SeriesOrExpression::Expression(rhs) => Ok(Self {
+                series: (&self.series + &rhs.expr)
+                    .map_err(|e| exceptions::PyValueError::new_err(e))?,
+            }),
+        }
+    }
+
+    /// Add this series to `rhs`, returning the result.
+    pub fn __radd__(&self, rhs: &PythonExpression) -> PyResult<Self> {
         Ok(Self {
-            series: &self.series + &rhs.series,
+            series: (&self.series + &rhs.expr).map_err(|e| exceptions::PyValueError::new_err(e))?,
         })
     }
 
-    pub fn __sub__(&self, rhs: &Self) -> PyResult<Self> {
+    pub fn __sub__(&self, rhs: SeriesOrExpression) -> PyResult<Self> {
+        match rhs {
+            SeriesOrExpression::Series(rhs) => Ok(Self {
+                series: &self.series - &rhs.series,
+            }),
+            SeriesOrExpression::Expression(rhs) => Ok(Self {
+                series: (&self.series - &rhs.expr)
+                    .map_err(|e| exceptions::PyValueError::new_err(e))?,
+            }),
+        }
+    }
+
+    pub fn __rsub__(&self, lhs: &PythonExpression) -> PyResult<Self> {
         Ok(Self {
-            series: &self.series - &rhs.series,
+            series: (&lhs.expr - &self.series).map_err(|e| exceptions::PyValueError::new_err(e))?,
         })
     }
 
-    pub fn __mul__(&self, rhs: &Self) -> PyResult<Self> {
+    pub fn __mul__(&self, rhs: SeriesOrExpression) -> PyResult<Self> {
+        match rhs {
+            SeriesOrExpression::Series(rhs) => Ok(Self {
+                series: &self.series * &rhs.series,
+            }),
+            SeriesOrExpression::Expression(rhs) => Ok(Self {
+                series: (&self.series * &rhs.expr)
+                    .map_err(|e| exceptions::PyValueError::new_err(e))?,
+            }),
+        }
+    }
+
+    pub fn __rmul__(&self, lhs: &PythonExpression) -> PyResult<Self> {
         Ok(Self {
-            series: &self.series * &rhs.series,
+            series: (&self.series * &lhs.expr).map_err(|e| exceptions::PyValueError::new_err(e))?,
         })
     }
 
-    pub fn __truediv__(&self, rhs: &Self) -> PyResult<Self> {
+    pub fn __truediv__(&self, rhs: SeriesOrExpression) -> PyResult<Self> {
+        match rhs {
+            SeriesOrExpression::Series(rhs) => Ok(Self {
+                series: &self.series / &rhs.series,
+            }),
+            SeriesOrExpression::Expression(rhs) => Ok(Self {
+                series: (&self.series / &rhs.expr)
+                    .map_err(|e| exceptions::PyValueError::new_err(e))?,
+            }),
+        }
+    }
+
+    pub fn __rtruediv__(&self, lhs: &PythonExpression) -> PyResult<Self> {
         Ok(Self {
-            series: &self.series / &rhs.series,
+            series: (&lhs.expr / &self.series).map_err(|e| exceptions::PyValueError::new_err(e))?,
         })
     }
 
@@ -3384,6 +3617,36 @@ impl PythonSeries {
         })
     }
 
+    /// Shift the series by `e` units of the ramification.
+    pub fn shift(&self, e: isize) -> Self {
+        Self {
+            series: self.series.clone().mul_exp_units(e),
+        }
+    }
+
+    /// Get the ramification.
+    pub fn get_ramification(&self) -> usize {
+        self.series.get_ramification()
+    }
+
+    /// Get the trailing exponent; the exponent of the first non-zero term.
+    pub fn get_trailing_exponent(&self) -> PyResult<(i64, i64)> {
+        if let Rational::Natural(n, d) = self.series.get_trailing_exponent() {
+            Ok((n, d))
+        } else {
+            Err(exceptions::PyValueError::new_err("Order is too large"))
+        }
+    }
+
+    /// Get the absolute order.
+    pub fn get_absolute_order(&self) -> PyResult<(i64, i64)> {
+        if let Rational::Natural(n, d) = self.series.absolute_order() {
+            Ok((n, d))
+        } else {
+            Err(exceptions::PyValueError::new_err("Order is too large"))
+        }
+    }
+
     /// Convert the series into an expression.
     pub fn to_expression(&self) -> PythonExpression {
         self.series.to_atom().into()
@@ -3429,16 +3692,27 @@ impl PythonTermStreamer {
         self.stream += &mut rhs.stream;
     }
 
+    /// Get the total number of bytes of the stream.
     pub fn get_byte_size(&self) -> usize {
         self.stream.get_byte_size()
     }
 
-    /// Add an expression to the term streamer.
+    /// Return true iff the stream fits in memory.
+    pub fn fits_in_memory(&self) -> bool {
+        self.stream.fits_in_memory()
+    }
+
+    /// Get the number of terms in the stream.
+    pub fn get_num_terms(&self) -> usize {
+        self.stream.get_num_terms()
+    }
+
+    /// Add an expression to the term stream.
     pub fn push(&mut self, expr: PythonExpression) {
         self.stream.push(expr.expr.clone());
     }
 
-    /// Sort and fuse all terms in the streamer.
+    /// Sort and fuse all terms in the stream.
     pub fn normalize(&mut self) {
         self.stream.normalize();
     }
@@ -3448,7 +3722,7 @@ impl PythonTermStreamer {
         self.stream.to_expression().into()
     }
 
-    /// Map the transformations to every term in the streamer.
+    /// Map the transformations to every term in the stream.
     pub fn map(&mut self, op: PythonPattern, py: Python) -> PyResult<Self> {
         let t = match &op.expr {
             Pattern::Transformer(t) => {
@@ -3484,6 +3758,38 @@ impl PythonTermStreamer {
             Ok::<_, PyErr>(m)
         })
         .map(|x| PythonTermStreamer { stream: x })
+    }
+
+    /// Map the transformations to every term in the stream using a single thread.
+    pub fn map_single_thread(&mut self, op: PythonPattern) -> PyResult<Self> {
+        let t = match &op.expr {
+            Pattern::Transformer(t) => {
+                if t.0.is_some() {
+                    return Err(exceptions::PyValueError::new_err(
+                        "Transformer is bound to expression. Use Transformer() instead."
+                            .to_string(),
+                    ));
+                }
+                &t.1
+            }
+            _ => {
+                return Err(exceptions::PyValueError::new_err(
+                    "Operation must of a transformer".to_string(),
+                ));
+            }
+        };
+
+        // map every term in the expression
+        let s = self.stream.map_single_thread(|x| {
+            let mut out = Atom::default();
+            Workspace::get_local().with(|ws| {
+                Transformer::execute(x.as_view(), &t, ws, &mut out)
+                    .unwrap_or_else(|e| panic!("Transformer failed during execution: {:?}", e));
+            });
+            out
+        });
+
+        Ok(PythonTermStreamer { stream: s })
     }
 }
 
@@ -4206,11 +4512,12 @@ macro_rules! generate_methods {
             }
 
             /// Divide `self` by `rhs`, returning the quotient and remainder.
-            pub fn quot_rem(&self, rhs: Self) -> (Self, Self) {
-                if self.poly.get_vars_ref() == rhs.poly.get_vars_ref() {
+            pub fn quot_rem(&self, rhs: Self) -> PyResult<(Self, Self)> {
+                if rhs.poly.is_zero() {
+                    Err(exceptions::PyValueError::new_err("Division by zero"))
+                } else if self.poly.get_vars_ref() == rhs.poly.get_vars_ref() {
                     let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-                    (Self { poly: q }, Self { poly: r })
+                    Ok((Self { poly: q }, Self { poly: r }))
                 } else {
                     let mut new_self = self.poly.clone();
                     let mut new_rhs = rhs.poly.clone();
@@ -4218,7 +4525,7 @@ macro_rules! generate_methods {
 
                     let (q, r) = new_self.quot_rem(&new_rhs, false);
 
-                    (Self { poly: q }, Self { poly: r })
+                    Ok((Self { poly: q }, Self { poly: r }))
                 }
             }
 
@@ -4226,6 +4533,25 @@ macro_rules! generate_methods {
             pub fn __neg__(&self) -> Self {
                 Self {
                     poly: self.poly.clone().neg(),
+                }
+            }
+
+            /// Compute the remainder `self % rhs.
+            pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
+                if rhs.poly.is_zero() {
+                    Err(exceptions::PyValueError::new_err("Division by zero"))
+                } else if self.poly.get_vars_ref() == rhs.poly.get_vars_ref() {
+                    Ok(Self {
+                        poly: self.poly.rem(&rhs.poly),
+                    })
+                } else {
+                    let mut new_self = self.poly.clone();
+                    let mut new_rhs = rhs.poly.clone();
+                    new_self.unify_variables(&mut new_rhs);
+
+                    Ok(Self {
+                        poly: new_self.rem(&new_rhs),
+                    })
                 }
             }
 
@@ -4348,7 +4674,7 @@ macro_rules! generate_methods {
                 Ok(Self { poly: self.poly.constant(self.poly.content())})
             }
 
-            /// Get the coefficient list in `x`.
+            /// Get the coefficient list, optionally in the variables `vars`.
             ///
             /// Examples
             /// --------
@@ -4358,18 +4684,46 @@ macro_rules! generate_methods {
             /// >>> p = Expression.parse('x*y+2*x+x^2').to_polynomial()
             /// >>> for n, pp in p.coefficient_list(x):
             /// >>>     print(n, pp)
-            pub fn coefficient_list(&self, var: PythonExpression) -> PyResult<Vec<(usize, Self)>> {
-                let x = self.poly.get_vars_ref().iter().position(|v| match (v, var.expr.as_view()) {
-                    (Variable::Symbol(y), AtomView::Var(vv)) => *y == vv.get_symbol(),
-                    (Variable::Function(_, f) | Variable::Other(f), a) => f.as_view() == a,
-                    _ => false,
-                }).ok_or(exceptions::PyValueError::new_err(format!(
-                    "Variable {} not found in polynomial",
-                    var.__str__()?
-                )))?;
+            pub fn coefficient_list(&self, vars: Option<OneOrMultiple<PythonExpression>>) -> PyResult<Vec<(Vec<usize>, Self)>> {
+                if let Some(vv) = vars {
+                    let mut vars = vec![];
 
-                Ok(self.poly.to_univariate_polynomial_list(x).into_iter()
-                    .map(|(f, p)| (p as usize, Self { poly: f })).collect())
+                    for vvv in vv.to_iter() {
+                        let x = self.poly.get_vars_ref().iter().position(|v| match (v, vvv.expr.as_view()) {
+                            (Variable::Symbol(y), AtomView::Var(vv)) => *y == vv.get_symbol(),
+                            (Variable::Function(_, f) | Variable::Other(f), a) => f.as_view() == a,
+                            _ => false,
+                        }).ok_or(exceptions::PyValueError::new_err(format!(
+                            "Variable {} not found in polynomial",
+                            vvv.__str__()?
+                        )))?;
+
+                        vars.push(x);
+                    }
+
+                    if vars.is_empty() {
+                        return Ok(self.poly.into_iter().map(|t| {
+                            (t.exponents.iter().map(|x| *x as usize).collect(), Self { poly: self.poly.constant(t.coefficient.clone()) })
+                       }).collect());
+                    }
+
+                    if vars.len() == 1 {
+                        return Ok(self.poly.to_univariate_polynomial_list(vars[0]).into_iter()
+                        .map(|(f, p)| (vec![p as usize], Self { poly: f })).collect());
+                    }
+
+                    // sort the exponents wrt the var map
+                    let mut r: Vec<(Vec<_>, _)> = self.poly.to_multivariate_polynomial_list(&vars, true).into_iter()
+                        .map(|(f, p)| (vars.iter().map(|v| f[*v] as usize).collect(), Self { poly: p })).collect();
+                    r.sort_by(|a, b| a.0.cmp(&b.0));
+
+                    Ok(r)
+
+                } else {
+                    Ok(self.poly.into_iter().map(|t| {
+                         (t.exponents.iter().map(|x| *x as usize).collect(), Self { poly: self.poly.constant(t.coefficient.clone()) })
+                    }).collect())
+                }
             }
 
             /// Replace the variable `x` with a polynomial `v`.
@@ -4462,13 +4816,6 @@ impl PythonRationalPolynomial {
     }
 }
 
-/// A Symbolica rational polynomial with variable powers limited to 255.
-#[pyclass(name = "RationalPolynomialSmallExponent", module = "symbolica")]
-#[derive(Clone)]
-pub struct PythonRationalPolynomialSmallExponent {
-    pub poly: RationalPolynomial<IntegerRing, u8>,
-}
-
 macro_rules! generate_rat_parse {
     ($type:ty) => {
         #[pymethods]
@@ -4523,7 +4870,6 @@ macro_rules! generate_rat_parse {
 }
 
 generate_rat_parse!(PythonRationalPolynomial);
-generate_rat_parse!(PythonRationalPolynomialSmallExponent);
 
 /// A Symbolica rational polynomial over finite fields.
 #[pyclass(name = "FiniteFieldRationalPolynomial", module = "symbolica")]
@@ -4703,7 +5049,7 @@ macro_rules! generate_rat_methods {
             pub fn __truediv__(&self, rhs: Self) -> Self {
                 if self.poly.get_variables() == rhs.poly.get_variables() {
                     Self {
-                        poly: &self.poly * &rhs.poly,
+                        poly: &self.poly / &rhs.poly,
                     }
                 } else {
                     let mut new_self = self.poly.clone();
@@ -4776,7 +5122,6 @@ macro_rules! generate_rat_methods {
 }
 
 generate_rat_methods!(PythonRationalPolynomial);
-generate_rat_methods!(PythonRationalPolynomialSmallExponent);
 generate_rat_methods!(PythonFiniteFieldRationalPolynomial);
 
 #[derive(FromPyObject)]

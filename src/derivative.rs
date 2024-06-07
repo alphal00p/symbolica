@@ -1,4 +1,7 @@
-use std::{ops::DerefMut, sync::Arc};
+use std::{
+    ops::{Add, DerefMut, Div, Mul, Sub},
+    sync::Arc,
+};
 
 use crate::{
     atom::{Atom, AtomView, FunctionBuilder, Symbol},
@@ -346,22 +349,18 @@ impl<'a> AtomView<'a> {
         depth: Rational,
     ) -> Result<Series<AtomField>, &'static str> {
         // heuristic current depth
-        let mut current_depth = if depth.is_negative() {
+        let mut current_depth = if depth.is_negative() || depth.is_zero() {
             Rational::one()
         } else {
             depth.clone()
         };
+
         Workspace::get_local().with(|ws| loop {
             let info = Series::new(
                 &AtomField::new(),
                 None,
-                if expansion_point.is_zero() {
-                    Arc::new(Variable::Symbol(x))
-                } else {
-                    Arc::new(Variable::Other(Arc::new(
-                        Atom::new_var(x) - &expansion_point.to_owned(),
-                    )))
-                },
+                Arc::new(Variable::Symbol(x)),
+                expansion_point.to_owned(),
                 &current_depth + &((1.into(), current_depth.denominator())).into(),
             );
 
@@ -506,6 +505,215 @@ impl<'a> AtomView<'a> {
     }
 }
 
+impl Mul<&Atom> for Series<AtomField> {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn mul(self, rhs: &Atom) -> Result<Series<AtomField>, &'static str> {
+        (&self) * rhs
+    }
+}
+
+impl Mul<&Series<AtomField>> for &Atom {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn mul(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, &'static str> {
+        rhs * self
+    }
+}
+
+impl Mul<&Series<AtomField>> for Atom {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn mul(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, &'static str> {
+        rhs * &self
+    }
+}
+
+impl Mul<&Atom> for &Series<AtomField> {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn mul(self, rhs: &Atom) -> Result<Series<AtomField>, &'static str> {
+        let Variable::Symbol(x) = self.get_variable().as_ref().clone() else {
+            panic!("Series variable is not a symbol");
+        };
+
+        let order = self.relative_order();
+        let expansion_point = self.get_expansion_point();
+
+        let mut current_depth = order.clone();
+
+        Workspace::get_local().with(|ws| loop {
+            let info = Series::new(
+                &AtomField::new(),
+                None,
+                self.get_variable().clone(),
+                expansion_point.to_owned(),
+                current_depth.clone(),
+            );
+
+            let series = rhs
+                .as_view()
+                .series_with_ws(x, expansion_point.as_view(), ws, &info)?;
+            if series.relative_order() >= order {
+                return Ok(series * self);
+            } else {
+                // increase the expansion depth
+                // TODO: is this ever needed?
+                current_depth = &current_depth * &2.into();
+            }
+        })
+    }
+}
+
+impl Add<&Atom> for Series<AtomField> {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn add(self, rhs: &Atom) -> Result<Series<AtomField>, &'static str> {
+        (&self) + rhs
+    }
+}
+
+impl Add<&Series<AtomField>> for &Atom {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn add(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, &'static str> {
+        rhs + self
+    }
+}
+
+impl Add<&Series<AtomField>> for Atom {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn add(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, &'static str> {
+        rhs + &self
+    }
+}
+
+impl Add<&Atom> for &Series<AtomField> {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn add(self, rhs: &Atom) -> Result<Series<AtomField>, &'static str> {
+        let Variable::Symbol(x) = self.get_variable().as_ref().clone() else {
+            panic!("Series variable is not a symbol");
+        };
+
+        let expansion_point = self.get_expansion_point();
+
+        let mut current_depth = self.relative_order().clone();
+
+        Workspace::get_local().with(|ws| loop {
+            let info = Series::new(
+                &AtomField::new(),
+                None,
+                self.get_variable().clone(),
+                expansion_point.to_owned(),
+                current_depth.clone(),
+            );
+
+            let series = rhs
+                .as_view()
+                .series_with_ws(x, expansion_point.as_view(), ws, &info)?;
+            if series.absolute_order() >= self.absolute_order() {
+                return Ok(&series + self);
+            } else {
+                // increase the expansion depth
+                current_depth = &current_depth * &2.into();
+            }
+        })
+    }
+}
+
+impl Div<&Atom> for Series<AtomField> {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn div(self, rhs: &Atom) -> Result<Series<AtomField>, &'static str> {
+        (&self) / rhs
+    }
+}
+
+impl Div<&Series<AtomField>> for &Atom {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn div(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, &'static str> {
+        rhs.rpow((-1, 1).into()) * self
+    }
+}
+
+impl Div<&Series<AtomField>> for Atom {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn div(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, &'static str> {
+        rhs.rpow((-1, 1).into()) * &self
+    }
+}
+
+impl Div<&Atom> for &Series<AtomField> {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn div(self, rhs: &Atom) -> Result<Series<AtomField>, &'static str> {
+        let Variable::Symbol(x) = self.get_variable().as_ref().clone() else {
+            panic!("Series variable is not a symbol");
+        };
+
+        let order = self.relative_order();
+        let expansion_point = self.get_expansion_point();
+
+        let mut current_depth = order.clone();
+
+        Workspace::get_local().with(|ws| loop {
+            let info = Series::new(
+                &AtomField::new(),
+                None,
+                self.get_variable().clone(),
+                expansion_point.to_owned(),
+                current_depth.clone(),
+            );
+
+            let series = rhs
+                .as_view()
+                .series_with_ws(x, expansion_point.as_view(), ws, &info)?;
+            if series.relative_order() >= order {
+                return Ok(self / &series);
+            } else {
+                // increase the expansion depth
+                current_depth = &current_depth * &2.into();
+            }
+        })
+    }
+}
+
+impl Sub<&Atom> for Series<AtomField> {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn sub(self, rhs: &Atom) -> Result<Series<AtomField>, &'static str> {
+        (&self) + &(-rhs)
+    }
+}
+
+impl Sub<&Series<AtomField>> for &Atom {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn sub(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, &'static str> {
+        -rhs.clone() + self
+    }
+}
+
+impl Sub<&Series<AtomField>> for Atom {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn sub(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, &'static str> {
+        -rhs.clone() + &self
+    }
+}
+
+impl Sub<&Atom> for &Series<AtomField> {
+    type Output = Result<Series<AtomField>, &'static str>;
+
+    fn sub(self, rhs: &Atom) -> Result<Series<AtomField>, &'static str> {
+        self + &(-rhs)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::{atom::Atom, state::State};
@@ -616,6 +824,18 @@ mod test {
     }
 
     #[test]
+    fn series_zero() {
+        let v1 = State::get_symbol("v1");
+
+        let input = Atom::parse("1/v1^2+1/v1+v1").unwrap();
+        let t = input
+            .series(v1, Atom::new_num(0).as_view(), 0.into())
+            .unwrap();
+
+        assert_eq!(t.to_atom().expand(), Atom::parse("v1^-2+v1^-1").unwrap());
+    }
+
+    #[test]
     fn series_poles() {
         let v1 = State::get_symbol("v1");
         let input = Atom::parse("1/(v1^10+v1^20)").unwrap();
@@ -624,8 +844,6 @@ mod test {
             .series(v1, Atom::new_num(0).as_view(), (-1).into())
             .unwrap()
             .to_atom();
-
-        println!("t={}", t);
 
         assert_eq!(t, Atom::parse("v1^-10").unwrap())
     }
@@ -660,5 +878,40 @@ mod test {
             .unwrap();
 
         assert_eq!(t.to_atom().expand(), Atom::parse("v1^8*exp(1)",).unwrap());
+    }
+
+    #[test]
+    fn series_mul_atom() {
+        let v1 = State::get_symbol("v1");
+
+        let input = Atom::parse("1/(1-v1)").unwrap();
+        let t = input
+            .series(v1, Atom::new_num(0).as_view(), 4.into())
+            .unwrap();
+
+        let r = (t * &Atom::parse("1/v1+1").unwrap()).unwrap();
+
+        assert_eq!(r.absolute_order(), (4, 1).into());
+
+        assert_eq!(
+            r.to_atom(),
+            Atom::parse("2*v1+v1^-1+2*v1^2+2*v1^3+2").unwrap()
+        );
+    }
+
+    #[test]
+    fn series_div_atom() {
+        let v1 = State::get_symbol("v1");
+
+        let input = Atom::parse("v1").unwrap();
+        let t = input
+            .series(v1, Atom::new_num(0).as_view(), 4.into())
+            .unwrap();
+
+        let r = (t / &Atom::parse("v1+1").unwrap()).unwrap();
+
+        assert_eq!(r.absolute_order(), (5, 1).into());
+
+        assert_eq!(r.to_atom(), Atom::parse("v1-v1^2+v1^3-v1^4").unwrap());
     }
 }

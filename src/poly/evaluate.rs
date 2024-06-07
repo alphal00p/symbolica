@@ -911,10 +911,13 @@ impl<N: NumericalFloatLike> std::fmt::Display for Variable<N> {
 }
 
 impl<N: NumericalFloatLike> Variable<N> {
-    pub fn convert<'a, NO: NumericalFloatLike + From<&'a N>>(&'a self) -> Variable<NO> {
+    pub fn convert<'a, NO: NumericalFloatLike, F: Fn(&N) -> NO>(
+        &'a self,
+        coeff_map: F,
+    ) -> Variable<NO> {
         match self {
             Variable::Var(v, index) => Variable::Var(*v, *index),
-            Variable::Constant(c) => Variable::Constant(NO::from(c)),
+            Variable::Constant(c) => Variable::Constant(coeff_map(c)),
         }
     }
 }
@@ -1133,7 +1136,24 @@ impl InstructionList {
                         }
                     }
 
-                    if same_op {
+                    if !same_op {
+                        continue;
+                    }
+
+                    if idx1 == idx2 {
+                        let count = a.iter().filter(|x| *x == &idx1).count();
+                        let pairs = count / 2;
+                        if pairs > 0 {
+                            a.retain(|x| x != &idx1);
+
+                            if count % 2 == 1 {
+                                a.push(idx1);
+                            }
+
+                            a.extend(std::iter::repeat(insert_index).take(pairs));
+                            a.sort();
+                        }
+                    } else {
                         let mut idx1_count = 0;
                         let mut idx2_count = 0;
                         for v in &*a {
@@ -1295,7 +1315,7 @@ enum InstructionRange {
 }
 /// A fast polynomial evaluator that evaluates polynomials written
 /// in the form:
-/// ```
+/// ```text
 /// Z0 = x
 /// Z1 = y
 /// Z2 = 2.
@@ -1367,8 +1387,12 @@ impl<'a, N: NumericalFloatLike> InstructionEvaluator<N> {
                                 + get_eval!(*pos + 3)
                         }
                         _ => {
-                            let mut tmp = N::zero();
-                            for aa in unsafe { self.indices.get_unchecked(*pos..(pos + len)) } {
+                            let mut tmp = unsafe {
+                                self.eval
+                                    .get_unchecked(*self.indices.get_unchecked(*pos))
+                                    .clone()
+                            };
+                            for aa in unsafe { self.indices.get_unchecked(*pos + 1..(pos + len)) } {
                                 tmp += unsafe { self.eval.get_unchecked(*aa) };
                             }
                             tmp
@@ -1386,8 +1410,12 @@ impl<'a, N: NumericalFloatLike> InstructionEvaluator<N> {
                                 * get_eval!(*pos + 3)
                         }
                         _ => {
-                            let mut tmp = N::one();
-                            for aa in unsafe { self.indices.get_unchecked(*pos..(pos + len)) } {
+                            let mut tmp = unsafe {
+                                self.eval
+                                    .get_unchecked(*self.indices.get_unchecked(*pos))
+                                    .clone()
+                            };
+                            for aa in unsafe { self.indices.get_unchecked(*pos + 1..(pos + len)) } {
                                 tmp *= unsafe { self.eval.get_unchecked(*aa) };
                             }
                             tmp
@@ -1414,8 +1442,9 @@ impl<N: Real + for<'b> From<&'b Rational>> InstructionEvaluator<N> {
     /// a variable or a function with fixed arguments.
     ///
     /// All variables and all user functions in the expression must occur in the map.
-    pub fn evaluate(
+    pub fn evaluate<F: Fn(&Rational) -> N + Copy>(
         &mut self,
+        coeff_map: F,
         const_map: &HashMap<AtomView<'_>, N>,
         function_map: &HashMap<Symbol, EvaluationFn<N>>,
     ) -> &[N] {
@@ -1423,12 +1452,14 @@ impl<N: Real + for<'b> From<&'b Rational>> InstructionEvaluator<N> {
             for (input, expr) in self.eval.iter_mut().zip(&self.input_map) {
                 match expr {
                     super::Variable::Symbol(s) => {
-                        *input = *const_map
+                        *input = const_map
                             .get(&ws.new_var(*s).as_view())
-                            .expect("Variable not found");
+                            .expect("Variable not found")
+                            .clone();
                     }
                     super::Variable::Function(_, o) | super::Variable::Other(o) => {
-                        *input = o.evaluate(const_map, function_map, &mut HashMap::default());
+                        *input =
+                            o.evaluate(coeff_map, const_map, function_map, &mut HashMap::default());
                     }
                     super::Variable::Temporary(_) => panic!("Temporary variable in input"),
                 }
@@ -1441,8 +1472,17 @@ impl<N: Real + for<'b> From<&'b Rational>> InstructionEvaluator<N> {
 
 impl<N: NumericalFloatLike> InstructionListOutput<N> {
     /// Convert all numbers in the instruction list from the field `N` to the field `NO`.
-    pub fn convert<'a, NO: NumericalFloatLike + From<&'a N>>(
+    pub fn convert<'a, NO: NumericalFloatLike + for<'b> From<&'b N>>(
         &'a self,
+    ) -> InstructionListOutput<NO> {
+        self.convert_with_map(|x| x.into())
+    }
+
+    /// Convert all numbers in the instruction list from the field `N` to the field `NO`,
+    /// using a custom map function.
+    pub fn convert_with_map<'a, NO: NumericalFloatLike, F: Fn(&N) -> NO + Copy>(
+        &'a self,
+        coeff_map: F,
     ) -> InstructionListOutput<NO> {
         let mut instr = Vec::with_capacity(self.instr.len());
 
@@ -1452,7 +1492,7 @@ impl<N: NumericalFloatLike> InstructionListOutput<N> {
                 Instruction::Mul(a) => Instruction::Mul(a.clone()),
                 Instruction::Yield(y) => Instruction::Yield(*y),
                 Instruction::Empty => unreachable!("No empty slots allowed in output"),
-                Instruction::Init(v) => Instruction::Init(v.convert()),
+                Instruction::Init(v) => Instruction::Init(v.convert(coeff_map)),
             };
             instr.push((*reg, new_instr));
         }
@@ -1464,7 +1504,7 @@ impl<N: NumericalFloatLike> InstructionListOutput<N> {
 
     /// Create a fast numerical evaluator.
     pub fn evaluator(&self) -> InstructionEvaluator<N> {
-        let mut eval = vec![N::zero(); self.instr.len()];
+        let mut eval = vec![N::new_zero(); self.instr.len()];
 
         let mut out_counter = 0;
         let mut simple_instr = vec![];
@@ -1501,7 +1541,7 @@ impl<N: NumericalFloatLike> InstructionListOutput<N> {
             instr: simple_instr,
             indices,
             eval,
-            out: vec![N::zero(); out_counter],
+            out: vec![N::new_zero(); out_counter],
         }
     }
 }
@@ -1732,11 +1772,13 @@ impl ExpressionEvaluator {
     /// ```
     /// can be represented by:
     /// ```
+    /// # use symbolica::atom::Atom;
+    /// # use symbolica::state::State;
     /// vec![
-    ///       vec![(x0, vec![Atom.parse("p1"), Atom.parse("p2")])],
-    ///       vec![(x1, vec![Atom.parse("x0(0) * x0(1) + 2")])],
-    ///       vec![(x2, vec![Atom.parse("x1(0) * 2 * x0(1)")])]
-    /// ]
+    ///       vec![(State::get_symbol("x0"), vec![Atom::parse("p1"), Atom::parse("p2")])],
+    ///       vec![(State::get_symbol("x1"), vec![Atom::parse("x0(0) * x0(1) + 2")])],
+    ///       vec![(State::get_symbol("x2"), vec![Atom::parse("x1(0) * 2 * x0(1)")])]
+    /// ];
     /// ```
     ///
     /// Each expression will be converted to a polynomial and optimized by writing it in a near-optimal Horner scheme and by performing
