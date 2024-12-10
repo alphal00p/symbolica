@@ -100,7 +100,7 @@ impl Symbol {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AtomType {
     Num,
     Var,
@@ -254,6 +254,12 @@ impl Hash for AtomOrView<'_> {
             AtomOrView::Atom(a) => a.as_view().hash(state),
             AtomOrView::View(a) => a.hash(state),
         }
+    }
+}
+
+impl<'a> From<Symbol> for AtomOrView<'a> {
+    fn from(s: Symbol) -> AtomOrView<'a> {
+        AtomOrView::Atom(Atom::new_var(s))
     }
 }
 
@@ -493,6 +499,7 @@ impl<'a> AtomView<'a> {
     }
 }
 
+/// A mathematical expression.
 #[derive(Clone)]
 pub enum Atom {
     Num(Num),

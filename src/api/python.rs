@@ -52,9 +52,9 @@ use crate::{
     },
     graph::Graph,
     id::{
-        Condition, ConditionResult, Match, MatchSettings, MatchStack, Pattern,
-        PatternAtomTreeIterator, PatternOrMap, PatternRestriction, ReplaceIterator, Replacement,
-        WildcardRestriction,
+        Condition, ConditionResult, Evaluate, Match, MatchSettings, MatchStack, Pattern,
+        PatternAtomTreeIterator, PatternOrMap, PatternRestriction, Relation, ReplaceIterator,
+        Replacement, WildcardRestriction,
     },
     numerical_integration::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Sample},
     parser::Token,
@@ -443,6 +443,67 @@ impl PythonTransformer {
         }
     }
 
+    /// Compare two expressions. If one of the expressions is not a number, an
+    /// internal ordering will be used.
+    fn __richcmp__(&self, other: ConvertibleToPattern, op: CompareOp) -> PyResult<PythonCondition> {
+        Ok(match op {
+            CompareOp::Eq => PythonCondition {
+                condition: Relation::Eq(self.expr.clone(), other.to_pattern()?.expr).into(),
+            },
+            CompareOp::Ne => PythonCondition {
+                condition: Relation::Ne(self.expr.clone(), other.to_pattern()?.expr).into(),
+            },
+            CompareOp::Ge => PythonCondition {
+                condition: Relation::Ge(self.expr.clone(), other.to_pattern()?.expr).into(),
+            },
+            CompareOp::Gt => PythonCondition {
+                condition: Relation::Gt(self.expr.clone(), other.to_pattern()?.expr).into(),
+            },
+            CompareOp::Le => PythonCondition {
+                condition: Relation::Le(self.expr.clone(), other.to_pattern()?.expr).into(),
+            },
+            CompareOp::Lt => PythonCondition {
+                condition: Relation::Lt(self.expr.clone(), other.to_pattern()?.expr).into(),
+            },
+        })
+    }
+
+    /// Test if the expression is of a certain type.
+    pub fn is_type(&self, atom_type: PythonAtomType) -> PythonCondition {
+        PythonCondition {
+            condition: Condition::Yield(Relation::IsType(
+                self.expr.clone(),
+                match atom_type {
+                    PythonAtomType::Num => AtomType::Num,
+                    PythonAtomType::Var => AtomType::Var,
+                    PythonAtomType::Add => AtomType::Add,
+                    PythonAtomType::Mul => AtomType::Mul,
+                    PythonAtomType::Pow => AtomType::Pow,
+                    PythonAtomType::Fn => AtomType::Fun,
+                },
+            )),
+        }
+    }
+
+    /// Returns true iff `self` contains `a` literally.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import *
+    /// >>> x, y, z = Expression.symbol('x', 'y', 'z')
+    /// >>> e = x * y * z
+    /// >>> e.contains(x) # True
+    /// >>> e.contains(x*y*z) # True
+    /// >>> e.contains(x*y) # False
+    pub fn contains(&self, s: ConvertibleToPattern) -> PyResult<PythonCondition> {
+        Ok(PythonCondition {
+            condition: Condition::Yield(Relation::Contains(
+                self.expr.clone(),
+                s.to_pattern()?.expr,
+            )),
+        })
+    }
+
     /// Create a transformer that expands products and powers.
     ///
     /// Examples
@@ -452,21 +513,47 @@ impl PythonTransformer {
     /// >>> f = Expression.symbol('f')
     /// >>> e = f((x+1)**2).replace_all(f(x_), x_.transform().expand())
     /// >>> print(e)
-    #[pyo3(signature = (var = None))]
-    pub fn expand(&self, var: Option<ConvertibleToExpression>) -> PyResult<PythonTransformer> {
+    #[pyo3(signature = (var = None, via_poly = None))]
+    pub fn expand(
+        &self,
+        var: Option<ConvertibleToExpression>,
+        via_poly: Option<bool>,
+    ) -> PyResult<PythonTransformer> {
         if let Some(var) = var {
-            let id = if let AtomView::Var(x) = var.to_expression().expr.as_view() {
-                x.get_symbol()
+            let e = var.to_expression();
+            if matches!(e.expr, Atom::Var(_) | Atom::Fun(_)) {
+                return append_transformer!(
+                    self,
+                    Transformer::Expand(Some(e.expr), via_poly.unwrap_or(false))
+                );
             } else {
                 return Err(exceptions::PyValueError::new_err(
-                    "Expansion must be done wrt a variable or function name",
+                    "Expansion must be done wrt an indeterminate",
                 ));
-            };
-
-            return append_transformer!(self, Transformer::Expand(Some(id)));
+            }
         } else {
-            return append_transformer!(self, Transformer::Expand(None));
+            return append_transformer!(self, Transformer::Expand(None, via_poly.unwrap_or(false)));
         }
+    }
+
+    /// Create a transformer that distributes numbers in the expression, for example:
+    /// `2*(x+y)` -> `2*x+2*y`.
+    ///
+    /// Examples
+    /// --------
+    ///
+    /// >>> from symbolica import *
+    /// >>> x, y = Expression.symbol('x', 'y')
+    /// >>> e = 3*(x+y)*(4*x+5*y)
+    /// >>> print(Transformer().expand_num()(e))
+    ///
+    /// yields
+    ///
+    /// ```
+    /// (3*x+3*y)*(4*x+5*y)
+    /// ```
+    pub fn expand_num(&self) -> PyResult<PythonTransformer> {
+        return append_transformer!(self, Transformer::ExpandNum);
     }
 
     /// Create a transformer that computes the product of a list of arguments.
@@ -891,6 +978,119 @@ impl PythonTransformer {
         return append_transformer!(self, Transformer::Repeat(rep_chain));
     }
 
+    /// Evaluate the condition and apply the `if_block` if the condition is true, otherwise apply the `else_block`.
+    /// The expression that is the input of the transformer is the input for the condition, the `if_block` and the `else_block`.
+    ///
+    /// Examples
+    /// --------
+    /// >>> t = T.map_terms(T.if_then(T.contains(x), T.print()))
+    /// >>> t(x + y + 4)
+    ///
+    /// prints `x`.
+    #[pyo3(signature = (condition, if_block, else_block = None))]
+    pub fn if_then(
+        &self,
+        condition: PythonCondition,
+        if_block: PythonTransformer,
+        else_block: Option<PythonTransformer>,
+    ) -> PyResult<PythonTransformer> {
+        let Pattern::Transformer(t1) = if_block.expr else {
+            return Err(exceptions::PyValueError::new_err(
+                "Argument must be a transformer",
+            ));
+        };
+
+        let t2 = if let Some(e) = else_block {
+            if let Pattern::Transformer(t2) = e.expr {
+                t2
+            } else {
+                return Err(exceptions::PyValueError::new_err(
+                    "Argument must be a transformer",
+                ));
+            }
+        } else {
+            Box::new((None, vec![]))
+        };
+
+        if t1.0.is_some() || t2.0.is_some() {
+            return Err(exceptions::PyValueError::new_err(
+                "Transformers in a repeat must be unbound. Use Transformer() to create it.",
+            ));
+        }
+
+        return append_transformer!(self, Transformer::IfElse(condition.condition, t1.1, t2.1));
+    }
+
+    /// Execute the `condition` transformer. If the result of the `condition` transformer is different from the input expression,
+    /// apply the `if_block`, otherwise apply the `else_block`. The input expression of the `if_block` is the output
+    /// of the `condition` transformer.
+    ///
+    /// Examples
+    /// --------
+    /// >>> t = T.map_terms(T.if_changed(T.replace_all(x, y), T.print()))
+    /// >>> print(t(x + y + 4))
+    ///
+    /// prints
+    /// ```log
+    /// y
+    /// 2*y+4
+    /// ```
+    #[pyo3(signature = (condition, if_block, else_block = None))]
+    pub fn if_changed(
+        &self,
+        condition: PythonTransformer,
+        if_block: PythonTransformer,
+        else_block: Option<PythonTransformer>,
+    ) -> PyResult<PythonTransformer> {
+        let Pattern::Transformer(t0) = condition.expr else {
+            return Err(exceptions::PyValueError::new_err(
+                "Argument must be a transformer",
+            ));
+        };
+
+        let Pattern::Transformer(t1) = if_block.expr else {
+            return Err(exceptions::PyValueError::new_err(
+                "Argument must be a transformer",
+            ));
+        };
+
+        let t2 = if let Some(e) = else_block {
+            if let Pattern::Transformer(t2) = e.expr {
+                t2
+            } else {
+                return Err(exceptions::PyValueError::new_err(
+                    "Argument must be a transformer",
+                ));
+            }
+        } else {
+            Box::new((None, vec![]))
+        };
+
+        if t0.0.is_some() || t1.0.is_some() || t2.0.is_some() {
+            return Err(exceptions::PyValueError::new_err(
+                "Transformers in a repeat must be unbound. Use Transformer() to create it.",
+            ));
+        }
+
+        return append_transformer!(self, Transformer::IfChanged(t0.1, t1.1, t2.1));
+    }
+
+    /// Break the current chain and all higher-level chains containing `if` transformers.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import *
+    /// >>> t = T.map_terms(T.repeat(
+    /// >>>     T.replace_all(y, 4),
+    /// >>>     T.if_changed(T.replace_all(x, y),
+    /// >>>                 T.break_chain()),
+    /// >>>     T.print()  # print of y is never reached
+    /// >>> ))
+    /// >>> print(t(x))
+    pub fn break_chain(&self) -> PyResult<PythonTransformer> {
+        return append_transformer!(self, Transformer::BreakChain);
+    }
+
     /// Chain several transformers. `chain(A,B,C)` is the same as `A.B.C`,
     /// where `A`, `B`, `C` are transformers.
     ///
@@ -955,6 +1155,7 @@ impl PythonTransformer {
                         workspace,
                         &mut out,
                         &MatchStack::new(&Condition::default(), &MatchSettings::default()),
+                        None,
                     )
                 })
                 .map_err(|e| match e {
@@ -1001,7 +1202,7 @@ impl PythonTransformer {
     }
 
     /// Create a transformer that collects terms involving the same power of `x`,
-    /// where `x` is a variable or function name.
+    /// where `x` is an indeterminate.
     /// Return the list of key-coefficient pairs and the remainder that matched no key.
     ///
     /// Both the key (the quantity collected in) and its coefficient can be mapped using
@@ -1033,20 +1234,29 @@ impl PythonTransformer {
     ///     A transformer to be applied to the quantity collected in
     /// coeff_map: Transformer
     ///     A transformer to be applied to the coefficient
-    #[pyo3(signature = (x, key_map = None, coeff_map = None))]
+    #[pyo3(signature = (*x, key_map = None, coeff_map = None))]
     pub fn collect(
         &self,
-        x: ConvertibleToExpression,
+        x: Bound<'_, PyTuple>,
         key_map: Option<PythonTransformer>,
         coeff_map: Option<PythonTransformer>,
     ) -> PyResult<PythonTransformer> {
-        let id = if let AtomView::Var(x) = x.to_expression().expr.as_view() {
-            x.get_symbol()
-        } else {
-            return Err(exceptions::PyValueError::new_err(
-                "Collect must be done wrt a variable or function name",
-            ));
-        };
+        let mut xs = vec![];
+        for a in x {
+            if let Ok(r) = a.extract::<PythonExpression>() {
+                if matches!(r.expr, Atom::Var(_) | Atom::Fun(_)) {
+                    xs.push(r.expr.into());
+                } else {
+                    return Err(exceptions::PyValueError::new_err(
+                        "Collect must be done wrt a variable or function",
+                    ));
+                }
+            } else {
+                return Err(exceptions::PyValueError::new_err(
+                    "Collect must be done wrt a variable or function",
+                ));
+            }
+        }
 
         let key_map = if let Some(key_map) = key_map {
             let Pattern::Transformer(p) = key_map.expr else {
@@ -1084,7 +1294,30 @@ impl PythonTransformer {
             vec![]
         };
 
-        return append_transformer!(self, Transformer::Collect(id, key_map, coeff_map));
+        return append_transformer!(self, Transformer::Collect(xs, key_map, coeff_map));
+    }
+
+    /// Create a transformer that collects numerical factors by removing the numerical content from additions.
+    /// For example, `-2*x + 4*x^2 + 6*x^3` will be transformed into `-2*(x - 2*x^2 - 3*x^3)`.
+    ///
+    /// The first argument of the addition is normalized to a positive quantity.
+    ///
+    /// Examples
+    /// --------
+    ///
+    /// >>> from symbolica import *
+    /// >>>
+    /// >>> x, y = Expression.symbol('x', 'y')
+    /// >>> e = (-3*x+6*y)(2*x+2*y)
+    /// >>> print(Transformer().collect_num()(e))
+    ///
+    /// yields
+    ///
+    /// ```log
+    /// -6*(x-2*y)*(x+y)
+    /// ```
+    pub fn collect_num(&self) -> PyResult<PythonTransformer> {
+        return append_transformer!(self, Transformer::CollectNum);
     }
 
     /// Create a transformer that collects terms involving the literal occurrence of `x`.
@@ -1248,7 +1481,7 @@ impl PythonTransformer {
         &self,
         lhs: ConvertibleToPattern,
         rhs: ConvertibleToPatternOrMap,
-        cond: Option<PythonPatternRestriction>,
+        cond: Option<ConvertibleToPatternRestriction>,
         non_greedy_wildcards: Option<Vec<PythonExpression>>,
         level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: Option<bool>,
@@ -1294,7 +1527,7 @@ impl PythonTransformer {
             Transformer::ReplaceAll(
                 lhs.to_pattern()?.expr,
                 rhs.to_pattern_or_map()?,
-                cond.map(|r| r.condition.clone()).unwrap_or_default(),
+                cond.map(|r| r.0).unwrap_or_default(),
                 settings,
             )
         );
@@ -1653,6 +1886,212 @@ impl PythonPatternRestriction {
     }
 }
 
+/// A restriction on wildcards.
+#[pyclass(name = "Condition", module = "symbolica")]
+#[derive(Clone)]
+pub struct PythonCondition {
+    pub condition: Condition<Relation>,
+}
+
+impl From<Condition<Relation>> for PythonCondition {
+    fn from(condition: Condition<Relation>) -> Self {
+        PythonCondition { condition }
+    }
+}
+
+#[pymethods]
+impl PythonCondition {
+    pub fn __repr__(&self) -> String {
+        format!("{:?}", self.condition)
+    }
+
+    pub fn __str__(&self) -> String {
+        format!("{}", self.condition)
+    }
+
+    pub fn eval(&self) -> PyResult<bool> {
+        Ok(self
+            .condition
+            .evaluate(&None)
+            .map_err(|e| exceptions::PyValueError::new_err(e))?
+            == ConditionResult::True)
+    }
+
+    pub fn __bool__(&self) -> PyResult<bool> {
+        self.eval()
+    }
+
+    /// Create a new pattern restriction that is the logical 'and' operation between two restrictions (i.e., both should hold).
+    pub fn __and__(&self, other: Self) -> PythonCondition {
+        (self.condition.clone() & other.condition.clone()).into()
+    }
+
+    /// Create a new pattern restriction that is the logical 'or' operation between two restrictions (i.e., one of the two should hold).
+    pub fn __or__(&self, other: Self) -> PythonCondition {
+        (self.condition.clone() | other.condition.clone()).into()
+    }
+
+    /// Create a new pattern restriction that takes the logical 'not' of the current restriction.
+    pub fn __invert__(&self) -> PythonCondition {
+        (!self.condition.clone()).into()
+    }
+
+    /// Convert the condition to a pattern restriction.
+    pub fn to_req(&self) -> PyResult<PythonPatternRestriction> {
+        self.condition
+            .clone()
+            .try_into()
+            .map(|e| PythonPatternRestriction { condition: e })
+            .map_err(|e| exceptions::PyValueError::new_err(e))
+    }
+}
+
+macro_rules! req_cmp_rel {
+    ($self:ident,$num:ident,$cmp_any_atom:ident,$c:ident) => {{
+        let num = if !$cmp_any_atom {
+            if let Pattern::Literal(a) = $num {
+                if let AtomView::Num(_) = a.as_view() {
+                    a
+                } else {
+                    return Err("Can only compare to number");
+                }
+            } else {
+                return Err("Can only compare to number");
+            }
+        } else if let Pattern::Literal(a) = $num {
+            a
+        } else {
+            return Err("Pattern must be literal");
+        };
+
+        if let Pattern::Wildcard(name) = $self {
+            if name.get_wildcard_level() == 0 {
+                return Err("Only wildcards can be restricted.");
+            }
+
+            Ok(PatternRestriction::Wildcard((
+                name,
+                WildcardRestriction::Filter(Box::new(move |v: &Match| {
+                    if let Match::Single(m) = v {
+                        if !$cmp_any_atom {
+                            if let AtomView::Num(_) = m {
+                                return m.cmp(&num.as_view()).$c();
+                            }
+                        } else {
+                            return m.cmp(&num.as_view()).$c();
+                        }
+                    }
+
+                    false
+                })),
+            )))
+        } else {
+            Err("Only wildcards can be restricted.")
+        }
+    }};
+}
+
+impl TryFrom<Relation> for PatternRestriction {
+    type Error = &'static str;
+
+    fn try_from(value: Relation) -> Result<Self, &'static str> {
+        match value {
+            Relation::Eq(atom, atom1) => {
+                return req_cmp_rel!(atom, atom1, true, is_eq);
+            }
+            Relation::Ne(atom, atom1) => {
+                return req_cmp_rel!(atom, atom1, true, is_ne);
+            }
+            Relation::Gt(atom, atom1) => {
+                return req_cmp_rel!(atom, atom1, true, is_gt);
+            }
+            Relation::Ge(atom, atom1) => {
+                return req_cmp_rel!(atom, atom1, true, is_ge);
+            }
+            Relation::Lt(atom, atom1) => {
+                return req_cmp_rel!(atom, atom1, true, is_lt);
+            }
+            Relation::Le(atom, atom1) => {
+                return req_cmp_rel!(atom, atom1, true, is_le);
+            }
+            Relation::Contains(atom, atom1) => {
+                if let Pattern::Wildcard(name) = atom {
+                    if name.get_wildcard_level() == 0 {
+                        return Err("Only wildcards can be restricted.");
+                    }
+
+                    if !matches!(&atom1, &Pattern::Literal(_)) {
+                        return Err("Pattern must be literal");
+                    }
+
+                    Ok(PatternRestriction::Wildcard((
+                        name,
+                        WildcardRestriction::Filter(Box::new(move |m| {
+                            let val = if let Pattern::Literal(a) = &atom1 {
+                                a.as_view()
+                            } else {
+                                unreachable!()
+                            };
+                            match m {
+                                Match::Single(v) => v.contains(val),
+                                Match::Multiple(_, v) => v.iter().any(|x| x.contains(val)),
+                                Match::FunctionName(_) => false,
+                            }
+                        })),
+                    )))
+                } else {
+                    Err("LHS must be wildcard")
+                }
+            }
+            Relation::IsType(atom, atom_type) => {
+                if let Pattern::Wildcard(name) = atom {
+                    Ok(PatternRestriction::Wildcard((
+                        name,
+                        WildcardRestriction::IsAtomType(atom_type),
+                    )))
+                } else {
+                    Err("LHS must be wildcard")
+                }
+            }
+        }
+    }
+}
+
+impl TryFrom<Condition<Relation>> for Condition<PatternRestriction> {
+    type Error = &'static str;
+
+    fn try_from(value: Condition<Relation>) -> Result<Self, &'static str> {
+        Ok(match value {
+            Condition::True => Condition::True,
+            Condition::False => Condition::False,
+            Condition::Yield(r) => Condition::Yield(r.try_into()?),
+            Condition::And(a) => Condition::And(Box::new((a.0.try_into()?, a.1.try_into()?))),
+            Condition::Or(a) => Condition::Or(Box::new((a.0.try_into()?, a.1.try_into()?))),
+            Condition::Not(a) => Condition::Not(Box::new((*a).try_into()?)),
+        })
+    }
+}
+
+pub struct ConvertibleToPatternRestriction(Condition<PatternRestriction>);
+
+impl<'a> FromPyObject<'a> for ConvertibleToPatternRestriction {
+    fn extract_bound(ob: &Bound<'a, pyo3::PyAny>) -> PyResult<Self> {
+        if let Ok(a) = ob.extract::<PythonPatternRestriction>() {
+            Ok(ConvertibleToPatternRestriction(a.condition))
+        } else if let Ok(a) = ob.extract::<PythonCondition>() {
+            Ok(ConvertibleToPatternRestriction(
+                a.condition
+                    .try_into()
+                    .map_err(|e| exceptions::PyValueError::new_err(e))?,
+            ))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "Cannot convert to pattern restriction",
+            ))
+        }
+    }
+}
+
 impl<'a> FromPyObject<'a> for ConvertibleToExpression {
     fn extract_bound(ob: &Bound<'a, pyo3::PyAny>) -> PyResult<Self> {
         if let Ok(a) = ob.extract::<PythonExpression>() {
@@ -1665,13 +2104,13 @@ impl<'a> FromPyObject<'a> for ConvertibleToExpression {
             Ok(ConvertibleToExpression(Atom::new_num(i).into()))
         } else if let Ok(_) = ob.extract::<PyBackedStr>() {
             // disallow direct string conversion
-            Err(exceptions::PyValueError::new_err(
+            Err(exceptions::PyTypeError::new_err(
                 "Cannot convert to expression",
             ))
         } else if let Ok(f) = ob.extract::<PythonMultiPrecisionFloat>() {
             Ok(ConvertibleToExpression(Atom::new_num(f.0).into()))
         } else {
-            Err(exceptions::PyValueError::new_err(
+            Err(exceptions::PyTypeError::new_err(
                 "Cannot convert to expression",
             ))
         }
@@ -1683,13 +2122,13 @@ impl<'a> FromPyObject<'a> for Symbol {
         if let Ok(a) = ob.extract::<PythonExpression>() {
             match a.expr.as_view() {
                 AtomView::Var(v) => Ok(v.get_symbol()),
-                e => Err(exceptions::PyValueError::new_err(format!(
+                e => Err(exceptions::PyTypeError::new_err(format!(
                     "Expected variable instead of {}",
                     e
                 ))),
             }
         } else {
-            Err(exceptions::PyValueError::new_err("Not a valid variable"))
+            Err(exceptions::PyTypeError::new_err("Not a valid variable"))
         }
     }
 }
@@ -2029,6 +2468,10 @@ impl PythonExpression {
             } else if name.chars().any(|x| illegal_chars.contains(&x)) {
                 Err(exceptions::PyValueError::new_err(
                     "Illegal character in name",
+                ))
+            } else if name.chars().next().unwrap().is_numeric() {
+                Err(exceptions::PyValueError::new_err(
+                    "Name cannot start with a number",
                 ))
             } else {
                 Ok(name)
@@ -2755,8 +3198,13 @@ impl PythonExpression {
     /// >>> e.contains(x) # True
     /// >>> e.contains(x*y*z) # True
     /// >>> e.contains(x*y) # False
-    pub fn contains(&self, s: ConvertibleToExpression) -> bool {
-        self.expr.contains(s.to_expression().expr.as_view())
+    pub fn contains(&self, s: ConvertibleToPattern) -> PyResult<PythonCondition> {
+        Ok(PythonCondition {
+            condition: Condition::Yield(Relation::Contains(
+                self.expr.into_pattern(),
+                s.to_pattern()?.expr,
+            )),
+        })
     }
 
     /// Get all symbols in the current expression, optionally including function symbols.
@@ -2877,6 +3325,35 @@ impl PythonExpression {
         }
     }
 
+    /// Create a pattern restriction that filters for expressions that contain `a`.
+    pub fn req_contains(&self, a: PythonExpression) -> PyResult<PythonPatternRestriction> {
+        match self.expr.as_view() {
+            AtomView::Var(v) => {
+                let name = v.get_symbol();
+                if v.get_wildcard_level() == 0 {
+                    return Err(exceptions::PyTypeError::new_err(
+                        "Only wildcards can be restricted.",
+                    ));
+                }
+
+                Ok(PythonPatternRestriction {
+                    condition: (
+                        name,
+                        WildcardRestriction::Filter(Box::new(move |m| match m {
+                            Match::Single(v) => v.contains(a.expr.as_view()),
+                            Match::Multiple(_, v) => v.iter().any(|x| x.contains(a.expr.as_view())),
+                            Match::FunctionName(_) => false,
+                        })),
+                    )
+                        .into(),
+                })
+            }
+            _ => Err(exceptions::PyTypeError::new_err(
+                "Only wildcards can be restricted.",
+            )),
+        }
+    }
+
     /// Create a pattern restriction that treats the wildcard as a literal variable,
     /// so that it only matches to itself.
     pub fn req_lit(&self) -> PyResult<PythonPatternRestriction> {
@@ -2899,42 +3376,46 @@ impl PythonExpression {
         }
     }
 
-    /// Compare two expressions.
-    fn __richcmp__(&self, other: ConvertibleToExpression, op: CompareOp) -> PyResult<bool> {
-        match op {
-            CompareOp::Eq => Ok(self.expr == other.to_expression().expr),
-            CompareOp::Ne => Ok(self.expr != other.to_expression().expr),
-            _ => {
-                let other = other.to_expression();
-                if let n1 @ AtomView::Num(_) = self.expr.as_view() {
-                    if let n2 @ AtomView::Num(_) = other.expr.as_view() {
-                        return Ok(match op {
-                            CompareOp::Eq => n1 == n2,
-                            CompareOp::Ge => n1 >= n2,
-                            CompareOp::Gt => n1 > n2,
-                            CompareOp::Le => n1 <= n2,
-                            CompareOp::Lt => n1 < n2,
-                            CompareOp::Ne => n1 != n2,
-                        });
-                    }
-                }
-
-                Err(exceptions::PyTypeError::new_err(format!(
-                    "Inequalities between expression that are not numbers are not allowed in {} {} {}",
-                    self.__str__()?,
-                    match op {
-                        CompareOp::Eq => "==",
-                        CompareOp::Ge => ">=",
-                        CompareOp::Gt => ">",
-                        CompareOp::Le => "<=",
-                        CompareOp::Lt => "<",
-                        CompareOp::Ne => "!=",
-                    },
-                    other.__str__()?,
-                )
-            ))
-            }
+    /// Test if the expression is of a certain type.
+    pub fn is_type(&self, atom_type: PythonAtomType) -> PythonCondition {
+        PythonCondition {
+            condition: Condition::Yield(Relation::IsType(
+                self.expr.into_pattern(),
+                match atom_type {
+                    PythonAtomType::Num => AtomType::Num,
+                    PythonAtomType::Var => AtomType::Var,
+                    PythonAtomType::Add => AtomType::Add,
+                    PythonAtomType::Mul => AtomType::Mul,
+                    PythonAtomType::Pow => AtomType::Pow,
+                    PythonAtomType::Fn => AtomType::Fun,
+                },
+            )),
         }
+    }
+
+    /// Compare two expressions. If one of the expressions is not a number, an
+    /// internal ordering will be used.
+    fn __richcmp__(&self, other: ConvertibleToPattern, op: CompareOp) -> PyResult<PythonCondition> {
+        Ok(match op {
+            CompareOp::Eq => PythonCondition {
+                condition: Relation::Eq(self.expr.into_pattern(), other.to_pattern()?.expr).into(),
+            },
+            CompareOp::Ne => PythonCondition {
+                condition: Relation::Ne(self.expr.into_pattern(), other.to_pattern()?.expr).into(),
+            },
+            CompareOp::Ge => PythonCondition {
+                condition: Relation::Ge(self.expr.into_pattern(), other.to_pattern()?.expr).into(),
+            },
+            CompareOp::Gt => PythonCondition {
+                condition: Relation::Gt(self.expr.into_pattern(), other.to_pattern()?.expr).into(),
+            },
+            CompareOp::Le => PythonCondition {
+                condition: Relation::Le(self.expr.into_pattern(), other.to_pattern()?.expr).into(),
+            },
+            CompareOp::Lt => PythonCondition {
+                condition: Relation::Lt(self.expr.into_pattern(), other.to_pattern()?.expr).into(),
+            },
+        })
     }
 
     /// Create a pattern restriction that passes when the wildcard is smaller than a number `num`.
@@ -3336,18 +3817,33 @@ impl PythonExpression {
     }
 
     /// Expand the expression. Optionally, expand in `var` only.
-    #[pyo3(signature = (var = None))]
-    pub fn expand(&self, var: Option<ConvertibleToExpression>) -> PyResult<PythonExpression> {
+    #[pyo3(signature = (var = None, via_poly = None))]
+    pub fn expand(
+        &self,
+        var: Option<ConvertibleToExpression>,
+        via_poly: Option<bool>,
+    ) -> PyResult<PythonExpression> {
         if let Some(var) = var {
-            let id = if let AtomView::Var(x) = var.to_expression().expr.as_view() {
-                x.get_symbol()
+            let e = var.to_expression();
+
+            if matches!(e.expr, Atom::Var(_) | Atom::Fun(_)) {
+                if via_poly.unwrap_or(false) {
+                    let b = self
+                        .expr
+                        .as_view()
+                        .expand_via_poly::<i16>(Some(e.expr.as_view()));
+                    Ok(b.into())
+                } else {
+                    let b = self.expr.as_view().expand_in(e.expr.as_view());
+                    Ok(b.into())
+                }
             } else {
                 return Err(exceptions::PyValueError::new_err(
-                    "Expansion must be done wrt a variable or function name",
+                    "Expansion must be done wrt an indeterminate",
                 ));
-            };
-
-            let b = self.expr.as_view().expand_in(id);
+            }
+        } else if via_poly.unwrap_or(false) {
+            let b = self.expr.as_view().expand_via_poly::<i16>(None);
             Ok(b.into())
         } else {
             let b = self.expr.as_view().expand();
@@ -3355,7 +3851,27 @@ impl PythonExpression {
         }
     }
 
-    /// Collect terms involving the same power of `x`, where `x` is a variable or function name.
+    /// Distribute numbers in the expression, for example:
+    /// `2*(x+y)` -> `2*x+2*y`.
+    ///
+    /// Examples
+    /// --------
+    ///
+    /// >>> from symbolica import Expression
+    /// >>> x, y = Expression.symbol('x', 'y')
+    /// >>> e = 3*(x+y)*(4*x+5*y)
+    /// >>> print(e.expand_num())
+    ///
+    /// yields
+    ///
+    /// ```log
+    /// (3*x+3*y)*(4*x+5*y)
+    /// ```
+    pub fn expand_num(&self) -> PythonExpression {
+        self.expr.expand_num().into()
+    }
+
+    /// Collect terms involving the same power of `x`, where `x` is an indeterminate.
     /// Return the list of key-coefficient pairs and the remainder that matched no key.
     ///
     /// Both the *key* (the quantity collected in) and its coefficient can be mapped using
@@ -3380,23 +3896,32 @@ impl PythonExpression {
     /// >>> print(e.collect(x, key_map=lambda x: exp(x), coeff_map=lambda x: coeff(x)))
     ///
     /// yields `var(1)*coeff(5)+var(x)*coeff(y+5)+var(x^2)*coeff(1)`.
-    #[pyo3(signature = (x, key_map = None, coeff_map = None))]
+    #[pyo3(signature = (*x, key_map = None, coeff_map = None))]
     pub fn collect(
         &self,
-        x: ConvertibleToExpression,
+        x: &Bound<'_, PyTuple>,
         key_map: Option<PyObject>,
         coeff_map: Option<PyObject>,
     ) -> PyResult<PythonExpression> {
-        let id = if let AtomView::Var(x) = x.to_expression().expr.as_view() {
-            x.get_symbol()
-        } else {
-            return Err(exceptions::PyValueError::new_err(
-                "Collect must be done wrt a variable or function name",
-            ));
-        };
+        let mut xs = vec![];
+        for a in x {
+            if let Ok(r) = a.extract::<PythonExpression>() {
+                if matches!(r.expr, Atom::Var(_) | Atom::Fun(_)) {
+                    xs.push(r.expr.into());
+                } else {
+                    return Err(exceptions::PyValueError::new_err(
+                        "Collect must be done wrt a variable or function",
+                    ));
+                }
+            } else {
+                return Err(exceptions::PyValueError::new_err(
+                    "Collect must be done wrt a variable or function",
+                ));
+            }
+        }
 
-        let b = self.expr.as_view().collect(
-            id,
+        let b = self.expr.collect_multiple::<i16>(
+            &Arc::new(xs),
             if let Some(key_map) = key_map {
                 Some(Box::new(move |key, out| {
                     Python::with_gil(|py| {
@@ -3440,12 +3965,35 @@ impl PythonExpression {
         Ok(b.into())
     }
 
+    /// Collect numerical factors by removing the numerical content from additions.
+    /// For example, `-2*x + 4*x^2 + 6*x^3` will be transformed into `-2*(x - 2*x^2 - 3*x^3)`.
+    ///
+    /// The first argument of the addition is normalized to a positive quantity.
+    ///
+    /// Examples
+    /// --------
+    ///
+    /// >>> from symbolica import Expression
+    /// >>>
+    /// >>> x, y = Expression.symbol('x', 'y')
+    /// >>> e = (-3*x+6*y)(2*x+2*y)
+    /// >>> print(e.collect_num())
+    ///
+    /// yields
+    ///
+    /// ```log
+    /// -6*(x-2*y)*(x+y)
+    /// ```
+    pub fn collect_num(&self) -> PythonExpression {
+        self.expr.collect_num().into()
+    }
+
     /// Collect terms involving the literal occurrence of `x`.
     ///
     /// Examples
     /// --------
     ///
-    /// from symbolica import Expression
+    /// >>> from symbolica import Expression
     /// >>>
     /// >>> x, y = Expression.symbol('x', 'y')
     /// >>> e = 5*x + x * y + x**2 + y*x**2
@@ -3461,7 +4009,7 @@ impl PythonExpression {
         r.into()
     }
 
-    /// Collect terms involving the same power of `x`, where `x` is a variable or function name.
+    /// Collect terms involving the same power of `x`, where `x` is an indeterminate.
     /// Return the list of key-coefficient pairs and the remainder that matched no key.
     ///
     /// Examples
@@ -3484,30 +4032,31 @@ impl PythonExpression {
     /// ```
     pub fn coefficient_list(
         &self,
-        x: ConvertibleToExpression,
+        x: Bound<'_, PyTuple>,
     ) -> PyResult<Vec<(PythonExpression, PythonExpression)>> {
-        let id = if let AtomView::Var(x) = x.to_expression().expr.as_view() {
-            x.get_symbol()
-        } else {
-            return Err(exceptions::PyValueError::new_err(
-                "Coefficient list must be done wrt a variable or function name",
-            ));
-        };
-
-        let (list, rest) = self.expr.coefficient_list(id);
-
-        let mut py_list: Vec<_> = list
-            .into_iter()
-            .map(|e| (e.0.to_owned().into(), e.1.into()))
-            .collect();
-
-        if let Atom::Num(n) = &rest {
-            if n.to_num_view().is_zero() {
-                return Ok(py_list);
+        let mut xs = vec![];
+        for a in x {
+            if let Ok(r) = a.extract::<PythonExpression>() {
+                if matches!(r.expr, Atom::Var(_) | Atom::Fun(_)) {
+                    xs.push(r.expr.into());
+                } else {
+                    return Err(exceptions::PyValueError::new_err(
+                        "Collect must be done wrt a variable or function",
+                    ));
+                }
+            } else {
+                return Err(exceptions::PyValueError::new_err(
+                    "Collect must be done wrt a variable or function",
+                ));
             }
         }
 
-        py_list.push((Atom::new_num(1).into(), rest.into()));
+        let list = self.expr.coefficient_list::<i16>(&xs);
+
+        let py_list: Vec<_> = list
+            .into_iter()
+            .map(|e| (e.0.to_owned().into(), e.1.into()))
+            .collect();
 
         Ok(py_list)
     }
@@ -3850,14 +4399,12 @@ impl PythonExpression {
     pub fn pattern_match(
         &self,
         lhs: ConvertibleToPattern,
-        cond: Option<PythonPatternRestriction>,
+        cond: Option<ConvertibleToPatternRestriction>,
         level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: Option<bool>,
         allow_new_wildcards_on_rhs: Option<bool>,
     ) -> PyResult<PythonMatchIterator> {
-        let conditions = cond
-            .map(|r| r.condition.clone())
-            .unwrap_or(Condition::default());
+        let conditions = cond.map(|r| r.0).unwrap_or(Condition::default());
         let settings = MatchSettings {
             level_range: level_range.unwrap_or((0, None)),
             level_is_tree_depth: level_is_tree_depth.unwrap_or(false),
@@ -3890,15 +4437,13 @@ impl PythonExpression {
     pub fn matches(
         &self,
         lhs: ConvertibleToPattern,
-        cond: Option<PythonPatternRestriction>,
+        cond: Option<ConvertibleToPatternRestriction>,
         level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: Option<bool>,
         allow_new_wildcards_on_rhs: Option<bool>,
     ) -> PyResult<bool> {
         let pat = lhs.to_pattern()?.expr;
-        let conditions = cond
-            .map(|r| r.condition.clone())
-            .unwrap_or(Condition::default());
+        let conditions = cond.map(|r| r.0).unwrap_or(Condition::default());
         let settings = MatchSettings {
             level_range: level_range.unwrap_or((0, None)),
             level_is_tree_depth: level_is_tree_depth.unwrap_or(false),
@@ -3941,14 +4486,12 @@ impl PythonExpression {
         &self,
         lhs: ConvertibleToPattern,
         rhs: ConvertibleToPatternOrMap,
-        cond: Option<PythonPatternRestriction>,
+        cond: Option<ConvertibleToPatternRestriction>,
         level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: Option<bool>,
         allow_new_wildcards_on_rhs: Option<bool>,
     ) -> PyResult<PythonReplaceIterator> {
-        let conditions = cond
-            .map(|r| r.condition.clone())
-            .unwrap_or(Condition::default());
+        let conditions = cond.map(|r| r.0.clone()).unwrap_or(Condition::default());
         let settings = MatchSettings {
             level_range: level_range.unwrap_or((0, None)),
             level_is_tree_depth: level_is_tree_depth.unwrap_or(false),
@@ -4012,7 +4555,7 @@ impl PythonExpression {
         &self,
         pattern: ConvertibleToPattern,
         rhs: ConvertibleToPatternOrMap,
-        cond: Option<PythonPatternRestriction>,
+        cond: Option<ConvertibleToPatternRestriction>,
         non_greedy_wildcards: Option<Vec<PythonExpression>>,
         level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: Option<bool>,
@@ -4059,15 +4602,11 @@ impl PythonExpression {
 
         let mut expr_ref = self.expr.as_view();
 
+        let cond = cond.map(|r| r.0);
+
         let mut out = RecycledAtom::new();
         let mut out2 = RecycledAtom::new();
-        while pattern.replace_all_into(
-            expr_ref,
-            rhs,
-            cond.as_ref().map(|r| &r.condition),
-            Some(&settings),
-            &mut out,
-        ) {
+        while pattern.replace_all_into(expr_ref, rhs, cond.as_ref(), Some(&settings), &mut out) {
             if !repeat.unwrap_or(false) {
                 break;
             }
@@ -4755,7 +5294,7 @@ impl PythonReplacement {
     pub fn new(
         pattern: ConvertibleToPattern,
         rhs: ConvertibleToPatternOrMap,
-        cond: Option<PythonPatternRestriction>,
+        cond: Option<ConvertibleToPatternRestriction>,
         non_greedy_wildcards: Option<Vec<PythonExpression>>,
         level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: Option<bool>,
@@ -4799,10 +5338,7 @@ impl PythonReplacement {
             settings.rhs_cache_size = rhs_cache_size;
         }
 
-        let cond = cond
-            .as_ref()
-            .map(|r| r.condition.clone())
-            .unwrap_or(Condition::default());
+        let cond = cond.map(|r| r.0).unwrap_or(Condition::default());
 
         Ok(Self {
             pattern,
@@ -4939,6 +5475,75 @@ impl PythonSeries {
 
     pub fn __str__(&self) -> PyResult<String> {
         Ok(format!("{}", self.series))
+    }
+
+    /// Convert the series into a LaTeX string.
+    pub fn to_latex(&self) -> PyResult<String> {
+        Ok(format!(
+            "$${}$$",
+            self.series
+                .format_string(&PrintOptions::latex(), PrintState::new())
+        ))
+    }
+
+    /// Convert the expression into a human-readable string, with tunable settings.
+    ///
+    /// Examples
+    /// --------
+    /// >>> a = Expression.parse('128378127123 z^(2/3)*w^2/x/y + y^4 + z^34 + x^(x+2)+3/5+f(x,x^2)')
+    /// >>> print(a.format(number_thousands_separator='_', multiplication_operator=' '))
+    #[pyo3(signature =
+        (terms_on_new_line = false,
+            color_top_level_sum = true,
+            color_builtin_symbols = true,
+            print_finite_field = true,
+            symmetric_representation_for_finite_field = false,
+            explicit_rational_polynomial = false,
+            number_thousands_separator = None,
+            multiplication_operator = '*',
+            double_star_for_exponentiation = false,
+            square_brackets_for_function = false,
+            num_exp_as_superscript = true,
+            latex = false,
+            precision = None)
+        )]
+    pub fn format(
+        &self,
+        terms_on_new_line: bool,
+        color_top_level_sum: bool,
+        color_builtin_symbols: bool,
+        print_finite_field: bool,
+        symmetric_representation_for_finite_field: bool,
+        explicit_rational_polynomial: bool,
+        number_thousands_separator: Option<char>,
+        multiplication_operator: char,
+        double_star_for_exponentiation: bool,
+        square_brackets_for_function: bool,
+        num_exp_as_superscript: bool,
+        latex: bool,
+        precision: Option<usize>,
+    ) -> PyResult<String> {
+        Ok(format!(
+            "{}",
+            self.series.format_string(
+                &PrintOptions {
+                    terms_on_new_line,
+                    color_top_level_sum,
+                    color_builtin_symbols,
+                    print_finite_field,
+                    symmetric_representation_for_finite_field,
+                    explicit_rational_polynomial,
+                    number_thousands_separator,
+                    multiplication_operator,
+                    double_star_for_exponentiation,
+                    square_brackets_for_function,
+                    num_exp_as_superscript,
+                    latex,
+                    precision,
+                },
+                PrintState::new()
+            )
+        ))
     }
 
     pub fn sin(&self) -> PyResult<Self> {

@@ -517,7 +517,7 @@ class Expression:
         transformations can be applied.
         """
 
-    def contains(self, a: Expression | int | float | Decimal) -> bool:
+    def contains(self, a: Transformer | Expression | int | float | Decimal) -> Condition:
         """Returns true iff `self` contains `a` literally.
 
         Examples
@@ -567,6 +567,16 @@ class Expression:
         >>> print(e)
 
         Yields `f(x)*f(1)`.
+        """
+
+    def is_type(self, atom_type: AtomType) -> Condition:
+        """
+        Test if the expression is of a certain type.
+        """
+
+    def req_contains(self, a: Expression) -> PatternRestriction:
+        """
+        Create a pattern restriction that filters for expressions that contain `a`.
         """
 
     def req_lit(self) -> PatternRestriction:
@@ -746,34 +756,34 @@ class Expression:
         >>> e = e.replace_all(f(x_,y_), 1, x_.req_cmp_ge(y_))
         """
 
-    def __eq__(self, other: Expression | int | float | Decimal) -> bool:
+    def __eq__(self, other: Expression | int | float | Decimal) -> Condition:
         """
         Compare two expressions.
         """
 
-    def __neq__(self, other: Expression | int | float | Decimal) -> bool:
+    def __neq__(self, other: Expression | int | float | Decimal) -> Condition:
         """
         Compare two expressions.
         """
 
-    def __lt__(self, other: Expression | int | float | Decimal) -> bool:
+    def __lt__(self, other: Expression | int | float | Decimal) -> Condition:
         """
-        Compare two expressions. Both expressions must be a number.
-        """
-
-    def __le__(self, other: Expression | int | float | Decimal) -> bool:
-        """
-        Compare two expressions. Both expressions must be a number.
+        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
         """
 
-    def __gt__(self, other: Expression | int | float | Decimal) -> bool:
+    def __le__(self, other: Expression | int | float | Decimal) -> Condition:
         """
-        Compare two expressions. Both expressions must be a number.
+        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
         """
 
-    def __ge__(self, other: Expression | int | float | Decimal) -> bool:
+    def __gt__(self, other: Expression | int | float | Decimal) -> Condition:
         """
-        Compare two expressions. Both expressions must be a number.
+        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
+        """
+
+    def __ge__(self, other: Expression | int | float | Decimal) -> Condition:
+        """
+        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
         """
 
     def __iter__(self) -> Iterator[Expression]:
@@ -812,19 +822,39 @@ class Expression:
                 A list of variables
         """
 
-    def expand(self, var: Optional[Expression] = None) -> Expression:
+    def expand(self, var: Optional[Expression] = None, via_poly: Optional[bool] = None) -> Expression:
         """
         Expand the expression. Optionally, expand in `var` only.
+
+        Using `via_poly=True` may give a significant speedup for large expressions.
+        """
+
+    def expand_num(self) -> Expression:
+        """ Distribute numbers in the expression, for example: `2*(x+y)` -> `2*x+2*y`.
+
+        Examples
+        --------
+
+        >>> from symbolica import *
+        >>> x, y = Expression.symbol('x', 'y')
+        >>> e = 3*(x+y)*(4*x+5*y)
+        >>> print(e.expand_num())
+
+        yields
+
+        ```
+        (3*x+3*y)*(4*x+5*y)
+        ```
         """
 
     def collect(
         self,
-        x: Expression,
+        *x: Expression,
         key_map: Optional[Callable[[Expression], Expression]] = None,
         coeff_map: Optional[Callable[[Expression], Expression]] = None,
     ) -> Expression:
         """
-        Collect terms involving the same power of `x`, where `x` is a variable or function name.
+        Collect terms involving the same power of the indeterminate(s) `x`.
         Return the list of key-coefficient pairs and the remainder that matched no key.
 
         Both the key (the quantity collected in) and its coefficient can be mapped using
@@ -851,19 +881,40 @@ class Expression:
 
         Parameters
         ----------
-        x: Expression
-            The variable to collect terms in
+        *x: Expression
+            The variable(s) or function(s) to collect terms in
         key_map
             A function to be applied to the quantity collected in
         coeff_map
             A function to be applied to the coefficient
         """
 
+    def collect_num(self) -> Expression:
+        """Collect numerical factors by removing the content from additions.
+        For example, `-2*x + 4*x^2 + 6*x^3` will be transformed into `-2*(x - 2*x^2 - 3*x^3)`.
+
+        The first argument of the addition is normalized to a positive quantity.
+
+        Examples
+        --------
+
+        >>> from symbolica import *
+        >>> x, y = Expression.symbol('x', 'y')
+        >>> e = (-3*x+6*y)*(2*x+2*y)
+        >>> print(e.collect_num())
+
+        yields
+
+        ```
+        -6*(x+y)*(x-2*y)
+        ```
+        """
+
     def coefficient_list(
-        self, x: Expression
+        self, *x: Expression
     ) -> Sequence[Tuple[Expression, Expression]]:
-        """Collect terms involving the same power of `x`, where `x` is a variable or function name.
-        Return the list of key-coefficient pairs and the remainder that matched no key.
+        """Collect terms involving the same power of `x`, where `x` are variables or functions.
+        Return the list of key-coefficient pairs.
 
         Examples
         --------
@@ -1015,7 +1066,7 @@ class Expression:
     def match(
         self,
         lhs: Transformer | Expression | int | float | Decimal,
-        cond: Optional[PatternRestriction] = None,
+        cond: Optional[PatternRestriction | Condition] = None,
         level_range: Optional[Tuple[int, Optional[int]]] = None,
         level_is_tree_depth: Optional[bool] = False,
         allow_new_wildcards_on_rhs: Optional[bool] = False,
@@ -1042,7 +1093,7 @@ class Expression:
     def matches(
         self,
         lhs: Transformer | Expression | int | float | Decimal,
-        cond: Optional[PatternRestriction] = None,
+        cond: Optional[PatternRestriction | Condition] = None,
         level_range: Optional[Tuple[int, Optional[int]]] = None,
         level_is_tree_depth: Optional[bool] = False,
         allow_new_wildcards_on_rhs: Optional[bool] = False,
@@ -1063,7 +1114,7 @@ class Expression:
         self,
         lhs: Transformer | Expression | int | float | Decimal,
         rhs: Transformer | Expression | Callable[[dict[Expression, Expression]], Expression] | int | float | Decimal,
-        cond: Optional[PatternRestriction] = None,
+        cond: Optional[PatternRestriction | Condition] = None,
         level_range: Optional[Tuple[int, Optional[int]]] = None,
         level_is_tree_depth: Optional[bool] = False,
         allow_new_wildcards_on_rhs: Optional[bool] = False,
@@ -1109,7 +1160,7 @@ class Expression:
         self,
         pattern: Transformer | Expression | int | float | Decimal,
         rhs: Transformer | Expression | Callable[[dict[Expression, Expression]], Expression] | int | float | Decimal,
-        cond: Optional[PatternRestriction] = None,
+        cond: Optional[PatternRestriction | Condition] = None,
         non_greedy_wildcards: Optional[Sequence[Expression]] = None,
         level_range: Optional[Tuple[int, Optional[int]]] = None,
         level_is_tree_depth: Optional[bool] = False,
@@ -1126,7 +1177,7 @@ class Expression:
         >>> x, w1_, w2_ = Expression.symbol('x','w1_','w2_')
         >>> f = Expression.symbol('f')
         >>> e = f(3,x)
-        >>> r = e.replace_all(f(w1_,w2_), f(w1_ - 1, w2_**2), (w1_ >= 1) & w2_.is_var())
+        >>> r = e.replace_all(f(w1_,w2_), f(w1_ - 1, w2_**2), w1_ >= 1)
         >>> print(r)
 
         Parameters
@@ -1423,7 +1474,7 @@ class Replacement:
             cls,
             pattern: Transformer | Expression | int | float | Decimal,
             rhs: Transformer | Expression | Callable[[dict[Expression, Expression]], Expression] | int | float | Decimal,
-            cond: Optional[PatternRestriction] = None,
+            cond: Optional[PatternRestriction | Condition] = None,
             non_greedy_wildcards: Optional[Sequence[Expression]] = None,
             level_range: Optional[Tuple[int, Optional[int]]] = None,
             level_is_tree_depth: Optional[bool] = False,
@@ -1477,6 +1528,34 @@ class PatternRestriction:
         """
 
 
+class Condition:
+    """Relations that evaluate to booleans"""
+
+    def eval(self) -> bool:
+        """Evaluate the condition."""
+
+    def __repr__(self) -> str:
+        """Return a string representation of the condition."""
+
+    def __str__(self) -> str:
+        """Return a string representation of the condition."""
+
+    def __bool__(self) -> bool:
+        """Return the boolean value of the condition."""
+
+    def __and__(self, other:  Condition) -> Condition:
+        """Create a condition that is the logical and operation between two conditions (i.e., both should hold)."""
+
+    def __or__(self, other:  Condition) -> Condition:
+        """Create a condition that is the logical 'or' operation between two conditions (i.e., at least one of the two should hold)."""
+
+    def __invert__(self) -> Condition:
+        """Create a condition that takes the logical 'not' of the current condition."""
+
+    def to_req(self) -> PatternRestriction:
+        """Convert the condition to a pattern restriction."""
+
+
 class CompareOp:
     """One of the following comparison operators: `<`,`>`,`<=`,`>=`,`==`,`!=`."""
 
@@ -1497,8 +1576,94 @@ class Transformer:
         >>> e = Transformer().expand()((1+x)**2)
         """
 
-    def expand(self, var: Optional[Expression] = None) -> Transformer:
-        """Create a transformer that expands products and powers.
+    def __eq__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+        """
+        Compare two transformers.
+        """
+
+    def __neq__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+        """
+        Compare two transformers.
+        """
+
+    def __lt__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+        """
+        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        """
+
+    def __le__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+        """
+        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        """
+
+    def __gt__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+        """
+        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        """
+
+    def __ge__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+        """
+        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        """
+
+    def is_type(self, atom_type: AtomType) -> Condition:
+        """
+        Test if the transformed expression is of a certain type.
+        """
+
+    def contains(self, element: Transformer | Expression | int | float | Decimal) -> Condition:
+        """
+        Create a transformer that checks if the expression contains the given `element`.
+        """
+
+    def if_then(self, condition: Condition, if_block: Transformer, else_block: Optional[Transformer] = None) -> Transformer:
+        """Evaluate the condition and apply the `if_block` if the condition is true, otherwise apply the `else_block`.
+        The expression that is the input of the transformer is the input for the condition, the `if_block` and the `else_block`.
+
+        Examples
+        --------
+        >>> t = T.map_terms(T.if_then(T.contains(x), T.print()))
+        >>> t(x + y + 4)
+
+        prints `x`.
+        """
+
+    def if_changed(self, condition: Transformer, if_block: Transformer, else_block: Optional[Transformer] = None) -> Transformer:
+        """Execute the `condition` transformer. If the result of the `condition` transformer is different from the input expression,
+        apply the `if_block`, otherwise apply the `else_block`. The input expression of the `if_block` is the output
+        of the `condition` transformer.
+
+        Examples
+        --------
+        >>> t = T.map_terms(T.if_changed(T.replace_all(x, y), T.print()))
+        >>> print(t(x + y + 4))
+
+        prints
+        ```
+        y
+        2*y+4
+        ```
+        """
+
+    def break_chain(self) -> Transformer:
+        """Break the current chain and all higher-level chains containing `if` transformers.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> t = T.map_terms(T.repeat(
+        >>>     T.replace_all(y, 4),
+        >>>     T.if_changed(T.replace_all(x, y),
+        >>>                 T.break_chain()),
+        >>>     T.print()  # print of y is never reached
+        >>> ))
+        >>> print(t(x))
+        """
+
+    def expand(self, var: Optional[Expression] = None, via_poly: Optional[bool] = None) -> Transformer:
+        """Create a transformer that expands products and powers. Optionally, expand in `var` only.
+
+        Using `via_poly=True` may give a significant speedup for large expressions.
 
         Examples
         --------
@@ -1507,6 +1672,24 @@ class Transformer:
         >>> f = Expression.symbol('f')
         >>> e = f((x+1)**2).replace_all(f(x_), x_.transform().expand())
         >>> print(e)
+        """
+
+    def expand_num(self) -> Expression:
+        """Create a transformer that distributes numbers in the expression, for example: `2*(x+y)` -> `2*x+2*y`.
+
+        Examples
+        --------
+
+        >>> from symbolica import *
+        >>> x, y = Expression.symbol('x', 'y')
+        >>> e = 3*(x+y)*(4*x+5*y)
+        >>> print(Transformer().expand_num()(e))
+
+        yields
+
+        ```
+        (3*x+3*y)*(4*x+5*y)
+        ```
         """
 
     def prod(self) -> Transformer:
@@ -1786,13 +1969,12 @@ class Transformer:
 
     def collect(
         self,
-        x: Expression,
+        *x: Expression,
         key_map: Optional[Transformer] = None,
         coeff_map: Optional[Transformer] = None,
     ) -> Transformer:
         """
-        Create a transformer that collect terms involving the same power of `x`,
-        where `x` is a variable or function name.
+        Create a transformer that collects terms involving the same power of the indeterminate(s) `x`.
         Return the list of key-coefficient pairs and the remainder that matched no key.
 
         Both the key (the quantity collected in) and its coefficient can be mapped using
@@ -1818,12 +2000,33 @@ class Transformer:
 
         Parameters
         ----------
-        x: Expression
-            The variable to collect terms in
+        *x: Expression
+            The variable(s) or function(s) to collect terms in
         key_map: Transformer
             A transformer to be applied to the quantity collected in
         coeff_map: Transformer
             A transformer to be applied to the coefficient
+        """
+
+    def collect_num(self) -> Expression:
+        """Create a transformer that collects numerical factors by removing the content from additions.
+        For example, `-2*x + 4*x^2 + 6*x^3` will be transformed into `-2*(x - 2*x^2 - 3*x^3)`.
+
+        The first argument of the addition is normalized to a positive quantity.
+
+        Examples
+        --------
+
+        >>> from symbolica import *
+        >>> x, y = Expression.symbol('x', 'y')
+        >>> e = (-3*x+6*y)*(2*x+2*y)
+        >>> print(Transformer().collect_num()(e))
+
+        yields
+
+        ```
+        -6*(x+y)*(x-2*y)
+        ```
         """
 
     def coefficient(self, x: Expression) -> Transformer:
@@ -1874,7 +2077,7 @@ class Transformer:
         self,
         pat: Transformer | Expression | int | float | Decimal,
         rhs: Transformer | Expression | Callable[[dict[Expression, Expression]], Expression] | int | float | Decimal,
-        cond: Optional[PatternRestriction] = None,
+        cond: Optional[PatternRestriction | Condition] = None,
         non_greedy_wildcards: Optional[Sequence[Expression]] = None,
         level_range: Optional[Tuple[int, Optional[int]]] = None,
         level_is_tree_depth: Optional[bool] = False,
@@ -1889,7 +2092,7 @@ class Transformer:
         >>> x, w1_, w2_ = Expression.symbol('x','w1_','w2_')
         >>> f = Expression.symbol('f')
         >>> e = f(3,x)
-        >>> r = e.transform().replace_all(f(w1_,w2_), f(w1_ - 1, w2_**2), (w1_ >= 1) & w2_.is_var())
+        >>> r = e.transform().replace_all(f(w1_,w2_), f(w1_ - 1, w2_**2), w1_ >= 1)
         >>> print(r)
 
         Parameters
@@ -1970,7 +2173,7 @@ class Transformer:
         >>> e = e.transform().stats('replace', Transformer().replace_all(f(x_), 1)).execute()
 
         yields
-        ```log
+        ```
         Stats for replace:
             In  │ 1 │  10.00 B │
             Out │ 1 │   3.00 B │ ⧗ 40.15µs
@@ -2056,6 +2259,32 @@ class Series:
     >>> s = Expression.parse("(1-cos(x))/sin(x)").series(x, 0, 4) * x
     >>> print(s)
     """
+
+    def __str__(self) -> str:
+        """Print the series in a human-readable format."""
+
+    def to_latex(self) -> str:
+        """Convert the series into a LaTeX string."""
+
+    def format(
+        self,
+        terms_on_new_line: bool = False,
+        color_top_level_sum: bool = True,
+        color_builtin_symbols: bool = True,
+        print_finite_field: bool = True,
+        symmetric_representation_for_finite_field: bool = False,
+        explicit_rational_polynomial: bool = False,
+        number_thousands_separator: Optional[str] = None,
+        multiplication_operator: str = "*",
+        double_star_for_exponentiation: bool = False,
+        square_brackets_for_function: bool = False,
+        num_exp_as_superscript: bool = True,
+        latex: bool = False,
+        precision: Optional[int] = None,
+    ) -> str:
+        """
+        Convert the series into a human-readable string.
+        """
 
     def __add__(self, other: Series | Expression) -> Series:
         """Add another series or expression to this series, returning the result."""

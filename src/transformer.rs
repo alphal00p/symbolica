@@ -1,11 +1,14 @@
-use std::{sync::Arc, time::Instant};
+use std::{ops::ControlFlow, sync::Arc, time::Instant};
 
 use crate::{
-    atom::{representation::FunView, Atom, AtomView, Fun, Symbol},
+    atom::{representation::FunView, Atom, AtomOrView, AtomView, Fun, Symbol},
     coefficient::{Coefficient, CoefficientView},
     combinatorics::{partitions, unique_permutations},
     domains::rational::Rational,
-    id::{Condition, MatchSettings, Pattern, PatternOrMap, PatternRestriction, Replacement},
+    id::{
+        Condition, Evaluate, MatchSettings, Pattern, PatternOrMap, PatternRestriction, Relation,
+        Replacement,
+    },
     printer::{AtomPrinter, PrintOptions},
     state::{RecycledAtom, State, Workspace},
 };
@@ -106,14 +109,21 @@ pub enum TransformerError {
 /// Operations that take a pattern as the input and produce an expression
 #[derive(Clone)]
 pub enum Transformer {
+    IfElse(Condition<Relation>, Vec<Transformer>, Vec<Transformer>),
+    IfChanged(Vec<Transformer>, Vec<Transformer>, Vec<Transformer>),
+    BreakChain,
     /// Expand the rhs.
-    Expand(Option<Symbol>),
+    Expand(Option<Atom>, bool),
+    /// Distribute numbers.
+    ExpandNum,
     /// Derive the rhs w.r.t a variable.
     Derivative(Symbol),
     /// Perform a series expansion.
     Series(Symbol, Atom, Rational, bool),
     ///Collect all terms in powers of a variable.
-    Collect(Symbol, Vec<Transformer>, Vec<Transformer>),
+    Collect(Vec<AtomOrView<'static>>, Vec<Transformer>, Vec<Transformer>),
+    /// Collect numbers.
+    CollectNum,
     /// Apply find-and-replace on the lhs.
     ReplaceAll(
         Pattern,
@@ -164,11 +174,16 @@ pub enum Transformer {
 impl std::fmt::Debug for Transformer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Transformer::Expand(s) => f.debug_tuple("Expand").field(s).finish(),
+            Transformer::IfElse(_, _, _) => f.debug_tuple("IfElse").finish(),
+            Transformer::IfChanged(_, _, _) => f.debug_tuple("IfChanged").finish(),
+            Transformer::BreakChain => f.debug_tuple("BreakChain").finish(),
+            Transformer::Expand(s, _) => f.debug_tuple("Expand").field(s).finish(),
+            Transformer::ExpandNum => f.debug_tuple("ExpandNum").finish(),
             Transformer::Derivative(x) => f.debug_tuple("Derivative").field(x).finish(),
             Transformer::Collect(x, a, b) => {
                 f.debug_tuple("Collect").field(x).field(a).field(b).finish()
             }
+            Transformer::CollectNum => f.debug_tuple("CollectNum").finish(),
             Transformer::ReplaceAll(pat, rhs, ..) => {
                 f.debug_tuple("ReplaceAll").field(pat).field(rhs).finish()
             }
@@ -409,17 +424,17 @@ impl Transformer {
         input: AtomView<'_>,
         workspace: &Workspace,
         out: &mut Atom,
-    ) -> Result<(), TransformerError> {
+    ) -> Result<ControlFlow<()>, TransformerError> {
         Transformer::execute_chain(input, std::slice::from_ref(self), workspace, out)
     }
 
-    /// Apply a chain of transformers to `orig_input`.
+    /// Apply a chain of transformers to `input`.
     pub fn execute_chain(
         input: AtomView<'_>,
         chain: &[Transformer],
         workspace: &Workspace,
         out: &mut Atom,
-    ) -> Result<(), TransformerError> {
+    ) -> Result<ControlFlow<()>, TransformerError> {
         out.set_from_view(&input);
         let mut tmp = workspace.new_atom();
         for t in chain {
@@ -427,6 +442,39 @@ impl Transformer {
             let cur_input = tmp.as_view();
 
             match t {
+                Transformer::IfElse(cond, t1, t2) => {
+                    if cond
+                        .evaluate(&Some(cur_input))
+                        .map_err(|e| TransformerError::ValueError(e))?
+                        .is_true()
+                    {
+                        if Transformer::execute_chain(cur_input, t1, workspace, out)?.is_break() {
+                            return Ok(ControlFlow::Break(()));
+                        }
+                    } else if Transformer::execute_chain(cur_input, t2, workspace, out)?.is_break()
+                    {
+                        return Ok(ControlFlow::Break(()));
+                    }
+                }
+                Transformer::IfChanged(cond, t1, t2) => {
+                    Transformer::execute_chain(cur_input, cond, workspace, out)?;
+                    std::mem::swap(out, &mut tmp);
+
+                    if tmp.as_view() != out.as_view() {
+                        if Transformer::execute_chain(tmp.as_view(), t1, workspace, out)?.is_break()
+                        {
+                            return Ok(ControlFlow::Break(()));
+                        }
+                    } else if Transformer::execute_chain(tmp.as_view(), t2, workspace, out)?
+                        .is_break()
+                    {
+                        return Ok(ControlFlow::Break(()));
+                    }
+                }
+                Transformer::BreakChain => {
+                    std::mem::swap(out, &mut tmp);
+                    return Ok(ControlFlow::Break(()));
+                }
                 Transformer::Map(f) => {
                     f(cur_input, out)?;
                 }
@@ -471,34 +519,50 @@ impl Transformer {
 
                     Self::execute_chain(cur_input, t, workspace, out)?;
                 }
-                Transformer::Expand(s) => {
-                    cur_input.expand_with_ws_into(workspace, *s, out);
+                Transformer::Expand(s, via_poly) => {
+                    if *via_poly {
+                        *out = cur_input.expand_via_poly::<u16>(s.as_ref().map(|x| x.as_view()));
+                    } else {
+                        cur_input.expand_with_ws_into(
+                            workspace,
+                            s.as_ref().map(|x| x.as_view()),
+                            out,
+                        );
+                    }
+                }
+                Transformer::ExpandNum => {
+                    cur_input.expand_num_into(out);
                 }
                 Transformer::Derivative(x) => {
                     cur_input.derivative_with_ws_into(*x, workspace, out);
                 }
-                Transformer::Collect(x, key_map, coeff_map) => cur_input.collect_into(
-                    *x,
-                    if key_map.is_empty() {
-                        None
-                    } else {
-                        let key_map = key_map.clone();
-                        Some(Box::new(move |i, o| {
-                            Workspace::get_local()
-                                .with(|ws| Self::execute_chain(i, &key_map, ws, o).unwrap())
-                        }))
-                    },
-                    if coeff_map.is_empty() {
-                        None
-                    } else {
-                        let coeff_map = coeff_map.clone();
-                        Some(Box::new(move |i, o| {
-                            Workspace::get_local()
-                                .with(|ws| Self::execute_chain(i, &coeff_map, ws, o).unwrap())
-                        }))
-                    },
-                    out,
-                ),
+                Transformer::Collect(x, key_map, coeff_map) => cur_input
+                    .collect_multiple_impl::<i16>(
+                        x,
+                        workspace,
+                        if key_map.is_empty() {
+                            None
+                        } else {
+                            let key_map = key_map.clone();
+                            Some(Box::new(move |i, o| {
+                                Workspace::get_local()
+                                    .with(|ws| Self::execute_chain(i, &key_map, ws, o).unwrap());
+                            }))
+                        },
+                        if coeff_map.is_empty() {
+                            None
+                        } else {
+                            let coeff_map = coeff_map.clone();
+                            Some(Box::new(move |i, o| {
+                                Workspace::get_local()
+                                    .with(|ws| Self::execute_chain(i, &coeff_map, ws, o).unwrap());
+                            }))
+                        },
+                        out,
+                    ),
+                Transformer::CollectNum => {
+                    *out = cur_input.collect_num();
+                }
                 Transformer::Series(x, expansion_point, depth, depth_is_absolute) => {
                     if let Ok(s) = cur_input.series(
                         *x,
@@ -810,7 +874,7 @@ impl Transformer {
             }
         }
 
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 }
 
@@ -835,7 +899,7 @@ mod test {
             Transformer::execute_chain(
                 p.as_view(),
                 &[
-                    Transformer::Expand(Some(State::get_symbol("v1"))),
+                    Transformer::Expand(Some(Atom::new_var(State::get_symbol("v1"))), false),
                     Transformer::Derivative(State::get_symbol("v1")),
                 ],
                 ws,
