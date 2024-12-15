@@ -6,6 +6,13 @@ use std::{
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
+use bincode::{
+    de::{BorrowDecoder, Decoder},
+    enc::Encoder,
+    error::{DecodeError, EncodeError},
+    impl_borrow_decode, BorrowDecode, Decode, Encode,
+};
+
 use crate::{
     poly::{gcd::LARGE_U32_PRIMES, polynomial::PolynomialRing, Exponent},
     printer::{PrintOptions, PrintState},
@@ -118,6 +125,42 @@ impl<T: Field> FractionNormalization for T {
 pub struct Fraction<R: Ring> {
     numerator: R::Element,
     denominator: R::Element,
+}
+
+impl<R: Ring> Encode for Fraction<R>
+where
+    R::Element: Encode,
+{
+    fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        self.numerator.encode(encoder)?;
+        self.denominator.encode(encoder)
+    }
+}
+
+impl<C, R: Ring> Decode<C> for Fraction<R>
+where
+    R::Element: Decode<C>,
+{
+    fn decode<D: Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
+        Ok(Fraction {
+            numerator: R::Element::decode(decoder)?,
+            denominator: R::Element::decode(decoder)?,
+        })
+    }
+}
+
+impl<'de, C, R: Ring> BorrowDecode<'de, C> for Fraction<R>
+where
+    R::Element: BorrowDecode<'de, C>,
+{
+    fn borrow_decode<D: BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, DecodeError> {
+        Ok(Fraction {
+            numerator: R::Element::borrow_decode(decoder)?,
+            denominator: R::Element::borrow_decode(decoder)?,
+        })
+    }
 }
 
 impl<R: Ring> Fraction<R> {

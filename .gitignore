@@ -6,6 +6,7 @@ target/
 .direnv/
 .direnv
 .devenv/
+.devenv/*
 .devenv
 devenv.local.nix
 

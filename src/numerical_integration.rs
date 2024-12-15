@@ -23,14 +23,14 @@
 //!      // sample 10_000 times per iteration
 //!      for _ in 0..10_000 {
 //!          grid.sample(&mut rng, &mut sample);
-//!     
+//!
 //!          if let Sample::Continuous(_cont_weight, xs) = &sample {
 //!              grid.add_training_sample(&sample, f(xs)).unwrap();
 //!          }
 //!      }
-//!     
+//!
 //!      grid.update(1.5, 1.5);
-//!     
+//!
 //!      println!(
 //!          "Integral at iteration {}: {}",
 //!          iteration,
@@ -39,6 +39,7 @@
 //! }
 //! ```
 
+use bincode::{Decode, Encode};
 use rand::{Rng, RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
 use serde::{Deserialize, Serialize};
@@ -60,7 +61,7 @@ use crate::domains::float::{ConstructibleFloat, Real, RealNumberLike};
 ///
 /// The accumulator also stores which samples yielded the highest weight thus far.
 /// This can be used to study the input that impacted the average and error the most.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct StatisticsAccumulator<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd>
 {
     sum: T,
@@ -383,7 +384,7 @@ impl<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> Statisti
 /// and contains the weight and the list of sample points.
 /// If the sample comes from a [DiscreteGrid], it is the variant [Discrete](Sample::Discrete) and contains
 /// the weight, the bin and the subsample if the bin has a nested grid.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub enum Sample<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> {
     Continuous(T, Vec<T>),
     Discrete(T, usize, Option<Box<Sample<T>>>),
@@ -453,14 +454,14 @@ impl<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> Sample<T
 ///      // sample 10_000 times per iteration
 ///      for _ in 0..10_000 {
 ///          grid.sample(&mut rng, &mut sample);
-///     
+///
 ///          if let Sample::Continuous(_cont_weight, xs) = &sample {
 ///              grid.add_training_sample(&sample, f(xs)).unwrap();
 ///          }
 ///      }
-///     
+///
 ///      grid.update(1.5, 1.5);
-///     
+///
 ///      println!(
 ///          "Integral at iteration {}: {}",
 ///          iteration,
@@ -468,7 +469,7 @@ impl<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> Sample<T
 ///      );
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub enum Grid<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> {
     Continuous(ContinuousGrid<T>),
     Discrete(DiscreteGrid<T>),
@@ -539,7 +540,7 @@ impl<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> Grid<T> 
     }
 }
 /// A bin of a discrete grid, which may contain a subgrid.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct Bin<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> {
     pub pdf: T,
     pub accumulator: StatisticsAccumulator<T>,
@@ -578,7 +579,7 @@ impl<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> Bin<T> {
 /// of a sample from the grid landing in a bin is proportional to its
 /// average value if training happens on the average, or to its
 /// variance (recommended).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct DiscreteGrid<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> {
     pub bins: Vec<Bin<T>>,
     pub accumulator: StatisticsAccumulator<T>,
@@ -797,7 +798,7 @@ impl<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> Discrete
 /// of a sample from the grid landing in a bin is proportional to its
 /// average value if training happens on the average, or to its
 /// variance (recommended).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ContinuousGrid<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> {
     pub continuous_dimensions: Vec<ContinuousDimension<T>>,
     pub accumulator: StatisticsAccumulator<T>,
@@ -925,7 +926,7 @@ impl<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> Continuo
 }
 
 /// A dimension in a continuous grid that contains a partitioning.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ContinuousDimension<T: Real + ConstructibleFloat + Copy + RealNumberLike + PartialOrd> {
     pub partitioning: Vec<T>,
     bin_accumulator: Vec<StatisticsAccumulator<T>>,
