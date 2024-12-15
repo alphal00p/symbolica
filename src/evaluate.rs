@@ -8,6 +8,7 @@ use std::{
 };
 
 use ahash::{AHasher, HashMap};
+use bincode::{Decode, Encode};
 use rand::{thread_rng, Rng};
 
 use self_cell::self_cell;
@@ -51,12 +52,40 @@ impl<A, T> EvaluationFn<A, T> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Encode, Decode, Debug)]
+#[bincode(decode_context = "StateMap")]
 pub struct FunctionMap<T = Rational> {
     map: HashMap<Atom, ConstOrExpr<T>>,
     tagged_fn_map: HashMap<(Symbol, Vec<Atom>), ConstOrExpr<T>>,
     tag: HashMap<Symbol, usize>,
 }
+
+// pub struct SerializableFunctionMap<T=Rational>{
+//     map: Vec(())
+// }
+
+// impl<T> Serialize for FunctionMap<T> {
+//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+//     where
+//         S: Serializer,
+//     {
+//         let mut state = serializer.serialize_struct("FunctionMap", 4)?;
+
+//         let map = self.map.iter().map(|(k, v)| (a.export));
+
+//         // Serialize the `id` field
+//         // state.serialize_field("id", &self.id)?;
+
+//         // Serialize the `binary_data` by encoding its binary representation
+//         // let binary_data = self.binary_data.export();
+//         // let encoded = encode(&binary_data); // Base64 encoding
+//         // state.serialize_field("binary_data", &encoded)?;
+
+//         // state.end()
+//     }
+// }
+
+// impl<T> Serialize for FunctionMap<T> {}
 
 impl<T> FunctionMap<T> {
     pub fn new() -> Self {
@@ -141,10 +170,64 @@ impl<T> FunctionMap<T> {
     }
 }
 
-#[derive(Clone)]
+use crate::state::StateMap;
+#[derive(Clone, Encode, Debug)]
 enum ConstOrExpr<T> {
     Const(T),
     Expr(String, usize, Vec<Symbol>, Atom),
+}
+
+impl<T> ::bincode::Decode<StateMap> for ConstOrExpr<T>
+where
+    T: ::bincode::Decode<StateMap>,
+{
+    fn decode<__D: ::bincode::de::Decoder<Context = StateMap>>(
+        decoder: &mut __D,
+    ) -> core::result::Result<Self, ::bincode::error::DecodeError> {
+        let variant_index = <u32 as ::bincode::Decode<__D::Context>>::decode(decoder)?;
+        match variant_index {
+            0u32 => Ok(Self::Const {
+                0: ::bincode::Decode::<__D::Context>::decode(decoder)?,
+            }),
+            1u32 => Ok(Self::Expr {
+                0: ::bincode::Decode::<__D::Context>::decode(decoder)?,
+                1: ::bincode::Decode::<__D::Context>::decode(decoder)?,
+                2: ::bincode::Decode::<__D::Context>::decode(decoder)?,
+                3: ::bincode::Decode::<__D::Context>::decode(decoder)?,
+            }),
+            variant => Err(::bincode::error::DecodeError::UnexpectedVariant {
+                found: variant,
+                type_name: "ConstOrExpr",
+                allowed: &::bincode::error::AllowedEnumVariants::Range { min: 0, max: 1 },
+            }),
+        }
+    }
+}
+impl<'__de, T> ::bincode::BorrowDecode<'__de, StateMap> for ConstOrExpr<T>
+where
+    T: ::bincode::de::BorrowDecode<'__de, StateMap>,
+{
+    fn borrow_decode<__D: ::bincode::de::BorrowDecoder<'__de, Context = StateMap>>(
+        decoder: &mut __D,
+    ) -> core::result::Result<Self, ::bincode::error::DecodeError> {
+        let variant_index = <u32 as ::bincode::Decode<__D::Context>>::decode(decoder)?;
+        match variant_index {
+            0u32 => Ok(Self::Const {
+                0: ::bincode::BorrowDecode::<__D::Context>::borrow_decode(decoder)?,
+            }),
+            1u32 => Ok(Self::Expr {
+                0: ::bincode::BorrowDecode::<__D::Context>::borrow_decode(decoder)?,
+                1: ::bincode::BorrowDecode::<__D::Context>::borrow_decode(decoder)?,
+                2: ::bincode::BorrowDecode::<__D::Context>::borrow_decode(decoder)?,
+                3: ::bincode::BorrowDecode::<__D::Context>::borrow_decode(decoder)?,
+            }),
+            variant => Err(::bincode::error::DecodeError::UnexpectedVariant {
+                found: variant,
+                type_name: "ConstOrExpr",
+                allowed: &::bincode::error::AllowedEnumVariants::Range { min: 0, max: 1 },
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

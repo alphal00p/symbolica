@@ -1,3 +1,7 @@
+use bincode::{
+    de::read::Reader, enc::write::Writer, impl_borrow_decode_with_context, BorrowDecode, Decode,
+    Encode,
+};
 use byteorder::{LittleEndian, WriteBytesExt};
 use bytes::{Buf, BufMut};
 use smartstring::alias::String;
@@ -5,7 +9,7 @@ use std::{
     borrow::Borrow,
     cmp::Ordering,
     hash::Hash,
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
 };
 
 use crate::{
@@ -154,6 +158,77 @@ impl InlineNum {
         AtomView::Num(NumView {
             data: &self.data[..self.size as usize],
         })
+    }
+}
+
+impl Encode for Atom {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        let d = self.as_view().get_data();
+        let writer = encoder.writer();
+        writer.write(&[0])?;
+        writer.write(&d.len().to_le_bytes())?;
+        writer.write(d)?;
+        Ok(())
+    }
+}
+
+#[test]
+fn encode_decode() {
+    let a = Atom::new_num(1);
+    let encoded_a = bincode::encode_to_vec(a, bincode::config::standard()).unwrap();
+    let mut export = vec![];
+    State::export(&mut export).unwrap();
+
+    let mut i = State::import(&mut Cursor::new(&export), None).unwrap();
+
+    let (atom, d) = bincode::decode_from_slice_with_context::<_, Atom, _>(
+        &encoded_a,
+        bincode::config::standard(),
+        &mut i,
+    )
+    .unwrap();
+}
+impl_borrow_decode_with_context!(Atom, StateMap);
+impl Decode<StateMap> for Atom {
+    fn decode<D: bincode::de::Decoder<Context = StateMap>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let atom = {
+            let source = decoder.reader();
+
+            let mut dest = Atom::Zero.into_raw();
+
+            // should also set whether rat poly coefficient needs to be converted
+            let mut flags_buf = [0; 1];
+            let mut size_buf = [0; 8];
+
+            source.read(&mut flags_buf)?;
+            source.read(&mut size_buf)?;
+
+            let n_size = u64::from_le_bytes(size_buf);
+
+            dest.extend(size_buf);
+            dest.resize(n_size as usize, 0);
+            source.read(&mut dest)?;
+
+            unsafe {
+                match dest[0] & TYPE_MASK {
+                    NUM_ID => Atom::Num(Num::from_raw(dest)),
+                    VAR_ID => Atom::Var(Var::from_raw(dest)),
+                    FUN_ID => Atom::Fun(Fun::from_raw(dest)),
+                    MUL_ID => Atom::Mul(Mul::from_raw(dest)),
+                    ADD_ID => Atom::Add(Add::from_raw(dest)),
+                    POW_ID => Atom::Pow(Pow::from_raw(dest)),
+                    _ => unreachable!("Unknown type {}", dest[0]),
+                }
+            }
+        };
+
+        let state_map = decoder.context();
+        Ok(atom.as_view().rename(&state_map))
     }
 }
 
