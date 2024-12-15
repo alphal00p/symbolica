@@ -1,5 +1,9 @@
 use std::process::Command;
 fn main() {
+    if cfg!(target_os = "macos") {
+        pyo3_build_config::add_extension_module_link_args();
+        println!("cargo:rustc-link-lib=gcc_s");
+    }
     let output = Command::new("git")
         .args(["describe", "--tags"])
         .output()

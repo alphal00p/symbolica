@@ -57,6 +57,8 @@
                          pkgs.gnum4
                          pkgs.gmp
                          pkgs.mpfr
+                         pkgs.python3
+                         pkgs.maturin
                          pkgs.gnumake
                          pkgs.diffutils
                          pkgs.glibc
