@@ -1,3 +1,4 @@
+#![allow(warnings)]
 //! Symbolica is a blazing fast computer algebra system.
 //!
 //! It can be used to perform mathematical operations,
@@ -236,6 +237,22 @@ impl LicenseManager {
             .get()
             .cloned()
             .or(env::var("SYMBOLICA_LICENSE").ok());
+            
+        /* START OF GAMMALOOP CUSTOM LICENSE MODIFICATION */
+        /* DISCLAIMER
+        |
+        | Allow the user to set the GAMMALOOP_USER environment variable to bypass the license
+        | This is a special measure unique to the gammaLoop fork of Symbolica and is not allowed
+        | to be used outside of the context of gammaLoop.
+        |
+        */
+        if let Some(gammaloop_key) = key.clone() {
+            if gammaloop_key == "GAMMALOOP_USER" {
+                LICENSED.store(true, Relaxed);                
+                return Ok(());
+            }
+        }
+        /* END OF GAMMALOOP CUSTOM LICENSE  MODIFICATION */
 
         let Some(mut key) = key else {
             std::thread::spawn(|| {
