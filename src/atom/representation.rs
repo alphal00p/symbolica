@@ -1,7 +1,9 @@
+//! Low-level representation of expressions.
 use bincode::{
     de::read::Reader, enc::write::Writer, impl_borrow_decode_with_context, BorrowDecode, Decode,
     Encode,
 };
+
 use byteorder::{LittleEndian, WriteBytesExt};
 use bytes::{Buf, BufMut};
 use smartstring::alias::String;
@@ -43,7 +45,9 @@ const MUL_HAS_COEFF_FLAG: u8 = 0b01000000;
 
 const ZERO_DATA: [u8; 3] = [NUM_ID, 1, 0];
 
+/// The underlying slice of expression data.
 pub type BorrowedRawAtom = [u8];
+/// A raw atom that does not have explicit variant information.
 pub type RawAtom = Vec<u8>;
 
 impl Borrow<BorrowedRawAtom> for Atom {
@@ -325,6 +329,7 @@ impl Atom {
     }
 }
 
+/// A number/coefficient.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Num {
     data: RawAtom,
@@ -417,6 +422,7 @@ impl Num {
     }
 }
 
+/// A variable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Var {
     data: RawAtom,
@@ -504,6 +510,7 @@ impl Var {
     }
 }
 
+/// A general function.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Fun {
     data: RawAtom,
@@ -654,6 +661,7 @@ impl Fun {
     }
 }
 
+/// An expression raised to the power of another expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Pow {
     data: RawAtom,
@@ -718,6 +726,7 @@ impl Pow {
     }
 }
 
+/// Multiplication of multiple subexpressions.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Mul {
     data: RawAtom,
@@ -906,6 +915,7 @@ impl Mul {
     }
 }
 
+/// Addition of multiple subexpressions.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Add {
     data: RawAtom,
@@ -1056,7 +1066,7 @@ impl<'a> VarView<'a> {
     pub fn get_symbol(&self) -> Symbol {
         let is_cyclesymmetric = self.data[0] & VAR_CYCLESYMMETRIC_FLAG == VAR_CYCLESYMMETRIC_FLAG;
 
-        Symbol::init_fn(
+        Symbol::raw_fn(
             self.data[1..].get_frac_u64().0 as u32,
             self.get_wildcard_level(),
             !is_cyclesymmetric && self.data[0] & FUN_SYMMETRIC_FLAG == FUN_SYMMETRIC_FLAG,
@@ -1087,6 +1097,7 @@ impl<'a> VarView<'a> {
     }
 }
 
+/// A view of a [Var].
 #[derive(Debug, Copy, Clone, Eq, Hash)]
 pub struct VarView<'a> {
     data: &'a [u8],
@@ -1098,6 +1109,7 @@ impl<'a, 'b> PartialEq<VarView<'b>> for VarView<'a> {
     }
 }
 
+/// A view of a [Fun].
 #[derive(Debug, Copy, Clone, Eq, Hash)]
 pub struct FunView<'a> {
     data: &'a [u8],
@@ -1151,7 +1163,7 @@ impl<'a> FunView<'a> {
         let is_cyclesymmetric = self.data[0] & FUN_SYMMETRIC_FLAG == FUN_SYMMETRIC_FLAG
             && id & FUN_ANTISYMMETRIC_FLAG == FUN_ANTISYMMETRIC_FLAG;
 
-        Symbol::init_fn(
+        Symbol::raw_fn(
             id as u32,
             self.get_wildcard_level(),
             !is_cyclesymmetric && self.data[0] & FUN_SYMMETRIC_FLAG == FUN_SYMMETRIC_FLAG,
@@ -1260,6 +1272,7 @@ impl<'a> FunView<'a> {
     }
 }
 
+/// A view of a [Num].
 #[derive(Debug, Copy, Clone, Eq, Hash)]
 pub struct NumView<'a> {
     data: &'a [u8],
@@ -1314,6 +1327,7 @@ impl<'a> NumView<'a> {
     }
 }
 
+/// A view of a [Pow].
 #[derive(Debug, Copy, Clone, Eq, Hash)]
 pub struct PowView<'a> {
     data: &'a [u8],
@@ -1390,6 +1404,7 @@ impl<'a> PowView<'a> {
     }
 }
 
+/// A view of a [Mul].
 #[derive(Debug, Copy, Clone, Eq, Hash)]
 pub struct MulView<'a> {
     data: &'a [u8],
@@ -1494,6 +1509,7 @@ impl<'a> MulView<'a> {
     }
 }
 
+/// A view of a [Add].
 #[derive(Debug, Copy, Clone, Eq, Hash)]
 pub struct AddView<'a> {
     data: &'a [u8],
@@ -1628,8 +1644,10 @@ impl<'a> AtomView<'a> {
         dest.write_all(d)
     }
 
-    /// Write the expression to a binary stream. The format is the byte-length first
+    /// Write the expression to a binary stream. The byte-length is written first,
     /// followed by the data. To import the expression in new session, also export the [`State`].
+    ///
+    /// Most users will want to use [AtomView::export] instead.
     #[inline(always)]
     pub fn write<W: Write>(&self, mut dest: W) -> Result<(), std::io::Error> {
         let d = self.get_data();
@@ -1731,6 +1749,7 @@ impl PartialEq<AtomView<'_>> for AtomView<'_> {
     }
 }
 
+/// An iterator of a list of atoms.
 #[derive(Debug, Copy, Clone)]
 pub struct ListIterator<'a> {
     data: &'a [u8],
@@ -1800,6 +1819,7 @@ impl<'a> Iterator for ListIterator<'a> {
     }
 }
 
+/// A slice of a list of atoms.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ListSlice<'a> {
     data: &'a [u8],
@@ -1917,6 +1937,7 @@ impl<'a> ListSlice<'a> {
     }
 }
 
+/// An iterator of a slice of atoms.
 pub struct ListSliceIterator<'a> {
     data: ListSlice<'a>,
 }

@@ -13,9 +13,21 @@
 //! fn main() {
 //!     let input = Atom::parse("x^2*log(2*x + y) + exp(3*x)").unwrap();
 //!     let a = input.derivative(Symbol::new("x"));
-//!     println!("d({})/dx = {}:", input, a);
+//!     println!("d/dx {} = {}:", input, a);
 //! }
 //! ```
+//!
+//! The main object to represent a general expressions is [Atom](atom::Atom). Most operations on [Atom](atom::Atom) are
+//! implemented as methods on the [AtomCore](atom::AtomCore) trait. The [Symbol](atom::Symbol) struct is used to represent
+//! variables or named functions, potentially with additional properties, such as symmetries.
+//!
+//! Instead of using general expressions, you can use more restricted formats such as [MultivariatePolynomial](poly::polynomial::MultivariatePolynomial), [UnivariatePolynomial](poly::univariate::UnivariatePolynomial) and [RationalPolynomial](domains::rational_polynomial::RationalPolynomial)
+//! which have optimized methods.
+//!
+//! To use Symbolica's exact numbers, see [Integer](domains::integer::Integer), [Rational](domains::rational::Rational), and [FiniteField](domains::finite_field::FiniteField).
+//! For evaluations with floating point numbers, see [Float](domains::float::Float), [F64](domains::float::F64) and [ErrorPropagatingFloat](domains::float::ErrorPropagatingFloat).
+//!
+//! For linear algebra, use [Matrix](tensors::matrix::Matrix) or [Vector](tensors::matrix::Vector).
 //!
 //! Check out the [guide](https://symbolica.io/docs/get_started.html) for more information, examples,
 //! and additional documentation.
@@ -59,7 +71,6 @@ pub mod state;
 pub mod streaming;
 pub mod tensors;
 pub mod transformer;
-pub mod utils;
 
 #[cfg(feature = "faster_alloc")]
 #[global_allocator]
@@ -69,6 +80,7 @@ static LICENSE_KEY: OnceCell<String> = OnceCell::new();
 static LICENSE_MANAGER: OnceCell<LicenseManager> = OnceCell::new();
 static LICENSED: AtomicBool = LicenseManager::init();
 
+/// Manage the license of the Symbolica instance.
 #[allow(dead_code)]
 pub struct LicenseManager {
     lock: Option<TcpListener>,
@@ -122,7 +134,8 @@ impl Default for LicenseManager {
 }
 
 impl LicenseManager {
-    pub fn new() -> LicenseManager {
+    /// Create a new license manager.
+    pub(crate) fn new() -> LicenseManager {
         let pid = std::process::id();
         let thread_id = std::thread::current().id();
 

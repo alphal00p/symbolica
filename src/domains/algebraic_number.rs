@@ -1,3 +1,5 @@
+//! Algebraic number fields, e.g. fields supporting sqrt(2).
+
 use std::sync::Arc;
 
 use rand::Rng;
@@ -9,6 +11,7 @@ use crate::{
         factor::Factorize, gcd::PolynomialGCD, polynomial::MultivariatePolynomial,
         PositiveExponent, Variable,
     },
+    tensors::matrix::Matrix,
 };
 
 use super::{
@@ -21,6 +24,36 @@ use super::{
 };
 
 /// An algebraic number ring, with a monic, irreducible defining polynomial.
+///
+/// # Examples
+///
+/// ```
+/// use symbolica::{
+///     atom::{Atom, AtomCore},
+///     domains::{algebraic_number::AlgebraicExtension, rational::Q, Ring},
+/// };
+///
+/// let extension = AlgebraicExtension::new(Atom::parse("x^2-2").unwrap().to_polynomial(&Q, None));
+/// let sqrt_2 = extension.to_element(Atom::parse("x").unwrap().to_polynomial::<_, u16>(&Q, None));
+///
+/// let square = extension.mul(&sqrt_2, &sqrt_2);
+/// assert_eq!(
+///      square,
+///      extension.to_element(Atom::parse("2").unwrap().to_polynomial(&Q, None))
+/// );
+///```
+///
+/// Galois field:
+///
+/// ```
+/// use symbolica::{
+///     atom::{Atom, AtomCore, Symbol},
+///     domains::{algebraic_number::AlgebraicExtension, finite_field::Zp, rational::Q, Ring},
+/// };
+///
+/// let field = AlgebraicExtension::galois_field(Zp::new(17), 4, Symbol::new("x0").into());
+/// ```
+///
 // TODO: make special case for degree two and three and hardcode the multiplication table
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct AlgebraicExtension<R: Ring> {
@@ -303,7 +336,12 @@ impl<R: Ring> AlgebraicExtension<R> {
         }
     }
 
-    pub fn to_element(&self, poly: MultivariatePolynomial<R, u16>) -> <Self as Ring>::Element {
+    pub fn to_element(&self, mut poly: MultivariatePolynomial<R, u16>) -> <Self as Ring>::Element {
+        if poly.nvars() == 0 {
+            poly.variables = self.poly.variables.clone();
+            poly.exponents = vec![0; poly.coefficients.len()];
+        }
+
         assert!(poly.nvars() == 1);
 
         if poly.degree(0) >= self.poly.degree(0) {
@@ -328,6 +366,25 @@ impl<R: Ring> std::fmt::Display for AlgebraicExtension<R> {
     }
 }
 
+/// A number in an algebraic number field.
+///
+/// # Examples
+///
+/// ```
+/// use symbolica::{
+///     atom::{Atom, AtomCore},
+///     domains::{algebraic_number::AlgebraicExtension, rational::Q, Ring},
+/// };
+///
+/// let extension = AlgebraicExtension::new(Atom::parse("x^2-2").unwrap().to_polynomial(&Q, None));
+/// let sqrt_2 = extension.to_element(Atom::parse("x").unwrap().to_polynomial::<_, u16>(&Q, None));
+///
+/// let square = extension.mul(&sqrt_2, &sqrt_2);
+/// assert_eq!(
+///      square,
+///      extension.to_element(Atom::parse("2").unwrap().to_polynomial(&Q, None))
+/// );
+///```
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct AlgebraicNumber<R: Ring> {
     pub(crate) poly: MultivariatePolynomial<R, u16>,
@@ -539,6 +596,63 @@ impl<R: Field + PolynomialGCD<u16>> Field for AlgebraicExtension<R> {
     }
 }
 
+impl<R: Field> AlgebraicExtension<R> {
+    /// Create a new minimal field extension that has the algebraic number `x` as a root.
+    pub fn simplify(&self, x: &AlgebraicNumber<R>) -> AlgebraicExtension<R> {
+        let mut polys = vec![];
+
+        let mut x_i = self.one();
+        for _ in 0..=self.poly.degree(0) {
+            x_i = self.mul(&x_i, &x);
+            polys.push(x_i.clone());
+
+            // solve system c_0 + c_1 x + c_i x^2 + ... + x^i = 0
+            let ncols = self.poly.degree(0).to_u32() as usize;
+
+            let mut m = vec![self.poly.ring.zero(); polys.len() * ncols];
+            for (row, p) in m.chunks_mut(ncols).zip(&polys) {
+                for monomial in &p.poly {
+                    row[monomial.exponents[0].to_u32() as usize] = monomial.coefficient.clone();
+                }
+            }
+
+            let mut rhs = m.split_off((polys.len() - 1) * ncols);
+            for e in &mut rhs {
+                *e = self.poly.ring.neg(&*e);
+            }
+
+            if polys.len() == 1 {
+                continue;
+            }
+
+            // TODO: recycle matrix
+            let mat = Matrix::from_linear(
+                m,
+                (polys.len() - 1) as u32,
+                ncols as u32,
+                self.poly.ring.clone(),
+            )
+            .unwrap()
+            .into_transposed();
+
+            let rhs = Matrix::new_vec(rhs, self.poly.ring.clone());
+
+            if let Ok(s) = mat.solve(&rhs) {
+                let mut res = s.into_vec();
+                res.push(self.poly.ring.one());
+                let mut new_poly = self.poly.zero();
+                for (p, c) in res.into_iter().enumerate() {
+                    new_poly = &new_poly + &new_poly.monomial(c, vec![p as u16]);
+                }
+
+                return AlgebraicExtension::new(new_poly);
+            }
+        }
+
+        unreachable!("Could not simplify algebraic number");
+    }
+}
+
 impl<R: Field + PolynomialGCD<u16>> AlgebraicExtension<R> {
     /// Extend the current algebraic extension `R[a]` with `b`, whose minimal polynomial
     /// is `R[a][b]` and form `R[b]`. Also return the new representation of `a` and `b`.
@@ -730,5 +844,26 @@ mod tests {
             .unwrap()
             .to_polynomial::<_, u16>(&Q, None);
         assert_eq!(rep2.poly, r2);
+    }
+
+    #[test]
+    fn simplify() {
+        let poly = AlgebraicExtension::new(
+            Atom::parse("13-16v1+28v1^2+2v1^3+11v1^4+v1^6")
+                .unwrap()
+                .to_polynomial(&Q, None),
+        );
+
+        let a = poly.to_element(
+            Atom::parse(
+                "-295/1882 -2693/1882v1 -237/1882v1^2 -385/941v1^3 -9/1882v1^4  -33/941v1^5",
+            )
+            .unwrap()
+            .to_polynomial::<_, u16>(&Q, None),
+        );
+
+        let r = poly.simplify(&a);
+        let res = Atom::parse("1+v1+v1^2").unwrap().to_polynomial(&Q, None);
+        assert_eq!(*r.poly, res);
     }
 }

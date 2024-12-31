@@ -1,3 +1,5 @@
+//! Fraction fields and rational numbers.
+
 use std::{
     borrow::Cow,
     fmt::{Display, Error, Formatter},
@@ -118,6 +120,7 @@ impl<T: Field> FractionNormalization for T {
     }
 }
 
+/// A fraction of two elements of a ring. Create a new one through [FractionField::to_element].
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Fraction<R: Ring> {
     numerator: R::Element,
@@ -161,13 +164,6 @@ where
 }
 
 impl<R: Ring> Fraction<R> {
-    pub fn new(numerator: R::Element, denominator: R::Element) -> Fraction<R> {
-        Fraction {
-            numerator,
-            denominator,
-        }
-    }
-
     pub fn numerator(&self) -> R::Element {
         self.numerator.clone()
     }
@@ -523,6 +519,10 @@ impl<R: EuclideanDomain + FractionNormalization> Field for FractionField<R> {
     }
 
     fn inv(&self, a: &Self::Element) -> Self::Element {
+        if R::is_zero(&a.numerator) {
+            panic!("Division by 0");
+        }
+
         let f = self.ring.get_normalization_factor(&a.numerator);
 
         Fraction {

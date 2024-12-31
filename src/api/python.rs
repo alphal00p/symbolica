@@ -481,20 +481,40 @@ impl PythonTransformer {
     }
 
     /// Returns true iff `self` contains `a` literally.
-    ///
-    /// Examples
-    /// --------
-    /// >>> from symbolica import *
-    /// >>> x, y, z = Expression.symbol('x', 'y', 'z')
-    /// >>> e = x * y * z
-    /// >>> e.contains(x) # True
-    /// >>> e.contains(x*y*z) # True
-    /// >>> e.contains(x*y) # False
     pub fn contains(&self, s: ConvertibleToPattern) -> PyResult<PythonCondition> {
         Ok(PythonCondition {
             condition: Condition::Yield(Relation::Contains(
                 self.expr.clone(),
                 s.to_pattern()?.expr,
+            )),
+        })
+    }
+
+    /// Create a transformer that tests whether the pattern is found in the expression.
+    /// Restrictions on the pattern can be supplied through `cond`.
+    #[pyo3(signature = (lhs, cond = None, level_range = None, level_is_tree_depth = None, allow_new_wildcards_on_rhs = None))]
+    pub fn matches(
+        &self,
+        lhs: ConvertibleToPattern,
+        cond: Option<ConvertibleToPatternRestriction>,
+        level_range: Option<(usize, Option<usize>)>,
+        level_is_tree_depth: Option<bool>,
+        allow_new_wildcards_on_rhs: Option<bool>,
+    ) -> PyResult<PythonCondition> {
+        let conditions = cond.map(|r| r.0).unwrap_or(Condition::default());
+        let settings = MatchSettings {
+            level_range: level_range.unwrap_or((0, None)),
+            level_is_tree_depth: level_is_tree_depth.unwrap_or(false),
+            allow_new_wildcards_on_rhs: allow_new_wildcards_on_rhs.unwrap_or(false),
+            ..MatchSettings::default()
+        };
+
+        Ok(PythonCondition {
+            condition: Condition::Yield(Relation::Matches(
+                self.expr.clone(),
+                lhs.to_pattern()?.expr,
+                conditions,
+                settings,
             )),
         })
     }
@@ -1600,6 +1620,7 @@ impl PythonTransformer {
                 num_exp_as_superscript,
                 latex,
                 precision,
+                pretty_matrix: false,
             },)
         );
     }
@@ -2029,6 +2050,25 @@ impl TryFrom<Relation> for PatternRestriction {
                                 Match::Multiple(_, v) => v.iter().any(|x| x.contains(val)),
                                 Match::FunctionName(_) => false,
                             }
+                        })),
+                    )))
+                } else {
+                    Err("LHS must be wildcard")
+                }
+            }
+            Relation::Matches(atom, pattern, cond, settings) => {
+                if let Pattern::Wildcard(name) = atom {
+                    if name.get_wildcard_level() == 0 {
+                        return Err("Only wildcards can be restricted.");
+                    }
+
+                    Ok(PatternRestriction::Wildcard((
+                        name,
+                        WildcardRestriction::Filter(Box::new(move |m| {
+                            m.to_atom()
+                                .pattern_match(&pattern, Some(&cond), Some(&settings))
+                                .next()
+                                .is_some()
                         })),
                     )))
                 } else {
@@ -2839,6 +2879,7 @@ impl PythonExpression {
                     num_exp_as_superscript,
                     latex,
                     precision,
+                    pretty_matrix: false,
                 },
             )
         ))
@@ -4442,8 +4483,7 @@ impl PythonExpression {
         level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: Option<bool>,
         allow_new_wildcards_on_rhs: Option<bool>,
-    ) -> PyResult<bool> {
-        let pat = lhs.to_pattern()?.expr;
+    ) -> PyResult<PythonCondition> {
         let conditions = cond.map(|r| r.0).unwrap_or(Condition::default());
         let settings = MatchSettings {
             level_range: level_range.unwrap_or((0, None)),
@@ -4452,14 +4492,14 @@ impl PythonExpression {
             ..MatchSettings::default()
         };
 
-        Ok(PatternAtomTreeIterator::new(
-            &pat,
-            self.expr.as_view(),
-            Some(&conditions),
-            Some(&settings),
-        )
-        .next()
-        .is_some())
+        Ok(PythonCondition {
+            condition: Condition::Yield(Relation::Matches(
+                self.expr.to_pattern(),
+                lhs.to_pattern()?.expr,
+                conditions,
+                settings,
+            )),
+        })
     }
 
     /// Return an iterator over the replacement of the pattern `self` on `lhs` by `rhs`.
@@ -5533,6 +5573,7 @@ impl PythonSeries {
                     num_exp_as_superscript,
                     latex,
                     precision,
+                    pretty_matrix: false,
                 },
                 PrintState::new()
             )
@@ -5990,6 +6031,7 @@ impl PythonPolynomial {
                 num_exp_as_superscript,
                 latex,
                 precision,
+                pretty_matrix: false,
             },
             PrintState::new(),
         ))
@@ -6808,6 +6850,7 @@ impl PythonFiniteFieldPolynomial {
                 num_exp_as_superscript,
                 latex,
                 precision,
+                pretty_matrix: false,
             },
             PrintState::new(),
         ))
@@ -7388,6 +7431,7 @@ impl PythonPrimeTwoPolynomial {
                 num_exp_as_superscript,
                 latex,
                 precision,
+                pretty_matrix: false,
             },
             PrintState::new(),
         ))
@@ -7928,6 +7972,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 num_exp_as_superscript,
                 latex,
                 precision,
+                pretty_matrix: false,
             },
             PrintState::new(),
         ))
@@ -8472,6 +8517,7 @@ impl PythonGaloisFieldPolynomial {
                 num_exp_as_superscript,
                 latex,
                 precision,
+                pretty_matrix: false,
             },
             PrintState::new(),
         ))
@@ -9017,6 +9063,7 @@ impl PythonNumberFieldPolynomial {
                 num_exp_as_superscript,
                 latex,
                 precision,
+                pretty_matrix: false,
             },
             PrintState::new(),
         ))
@@ -10637,6 +10684,47 @@ impl PythonMatrix {
         })
     }
 
+    /// Solve `A * x = b` for `x`, where `A` is the current matrix and return any solution if the
+    /// system is underdetermined.
+    pub fn solve_any(&self, b: PythonMatrix) -> PyResult<PythonMatrix> {
+        let (new_self, new_rhs) = self.unify(&b);
+        Ok(PythonMatrix {
+            matrix: new_self
+                .matrix
+                .solve_any(&new_rhs.matrix)
+                .map_err(|e| exceptions::PyValueError::new_err(format!("{}", e)))?,
+        })
+    }
+
+    /// Augment the matrix with another matrix, e.g. create `[A B]` from matrix `A` and `B`.
+    ///
+    /// Returns an error when the matrices do not have the same number of rows.
+    pub fn row_reduce(&mut self, max_col: u32) -> usize {
+        self.matrix.row_reduce(max_col)
+    }
+
+    /// Solve `A * x = b` for `x`, where `A` is the current matrix.
+    pub fn augment(&self, b: PythonMatrix) -> PyResult<PythonMatrix> {
+        let (a, b) = self.unify(&b);
+
+        Ok(PythonMatrix {
+            matrix: a
+                .matrix
+                .augment(&b.matrix)
+                .map_err(|e| exceptions::PyValueError::new_err(format!("{}", e)))?,
+        })
+    }
+
+    /// Solve `A * x = b` for `x`, where `A` is the current matrix.
+    pub fn split_col(&self, index: u32) -> PyResult<(PythonMatrix, PythonMatrix)> {
+        let (a, b) = self
+            .matrix
+            .split_col(index)
+            .map_err(|e| exceptions::PyValueError::new_err(format!("{}", e)))?;
+
+        Ok((PythonMatrix { matrix: a }, PythonMatrix { matrix: b }))
+    }
+
     /// Get the content of the matrix, i.e. the gcd of all entries.
     pub fn content(&self) -> PythonRationalPolynomial {
         PythonRationalPolynomial {
@@ -10697,6 +10785,49 @@ impl PythonMatrix {
         Ok(PythonRationalPolynomial {
             poly: self.matrix[(idx.0 as u32, idx.1 as u32)].clone(),
         })
+    }
+
+    /// Convert the matrix into a human-readable string, with tunable settings.
+    #[pyo3(signature =
+        (pretty_matrix = true,
+            number_thousands_separator = None,
+            multiplication_operator = '*',
+            double_star_for_exponentiation = false,
+            square_brackets_for_function = false,
+            num_exp_as_superscript = true,
+            latex = false,
+            precision = None)
+        )]
+    pub fn format(
+        &self,
+        pretty_matrix: bool,
+        number_thousands_separator: Option<char>,
+        multiplication_operator: char,
+        double_star_for_exponentiation: bool,
+        square_brackets_for_function: bool,
+        num_exp_as_superscript: bool,
+        latex: bool,
+        precision: Option<usize>,
+    ) -> String {
+        self.matrix.format_string(
+            &PrintOptions {
+                terms_on_new_line: false,
+                color_top_level_sum: false,
+                color_builtin_symbols: false,
+                print_finite_field: false,
+                symmetric_representation_for_finite_field: false,
+                explicit_rational_polynomial: false,
+                number_thousands_separator,
+                multiplication_operator,
+                double_star_for_exponentiation,
+                square_brackets_for_function,
+                num_exp_as_superscript,
+                latex,
+                precision,
+                pretty_matrix,
+            },
+            PrintState::default(),
+        )
     }
 
     /// Convert the matrix into a LaTeX string.
