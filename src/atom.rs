@@ -43,6 +43,7 @@ mod coefficient;
 mod core;
 pub mod representation;
 
+use bincode::{de::read::Reader, enc::write::Writer, Decode, Encode};
 use representation::InlineVar;
 use smartstring::{LazyCompact, SmartString};
 
@@ -62,6 +63,7 @@ pub use self::representation::{
     PowView, Var, VarView,
 };
 use self::representation::{FunView, RawAtom};
+
 
 /// A function that is called after normalization of the arguments.
 /// If the input, the first argument, is normalized, the function should return `false`.
@@ -97,6 +99,7 @@ pub enum FunctionAttribute {
     Linear,
 }
 
+use std::result;
 /// A symbol, for example the name of a variable or the name of a function,
 /// together with its properties.
 ///
@@ -124,6 +127,49 @@ pub struct Symbol {
     is_linear: bool,
 }
 
+impl<__Context> ::bincode::Decode<__Context> for Symbol {
+    fn decode<__D: ::bincode::de::Decoder<Context = __Context>>(
+        decoder: &mut __D,
+    ) -> Result<Self, ::bincode::error::DecodeError> {
+        Ok(Self {
+            id: ::bincode::Decode::decode(decoder)?,
+            wildcard_level: ::bincode::Decode::decode(decoder)?,
+            is_symmetric: ::bincode::Decode::decode(decoder)?,
+            is_antisymmetric: ::bincode::Decode::decode(decoder)?,
+            is_cyclesymmetric: ::bincode::Decode::decode(decoder)?,
+            is_linear: ::bincode::Decode::decode(decoder)?,
+        })
+    }
+}
+impl<'__de, __Context> ::bincode::BorrowDecode<'__de, __Context> for Symbol {
+    fn borrow_decode<__D: ::bincode::de::BorrowDecoder<'__de, Context = __Context>>(
+        decoder: &mut __D,
+    ) -> Result<Self, ::bincode::error::DecodeError> {
+        Ok(Self {
+            id: ::bincode::BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            wildcard_level: ::bincode::BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            is_symmetric: ::bincode::BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            is_antisymmetric: ::bincode::BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            is_cyclesymmetric: ::bincode::BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+            is_linear: ::bincode::BorrowDecode::<'_, __Context>::borrow_decode(decoder)?,
+        })
+    }
+}
+
+impl ::bincode::Encode for Symbol {
+    fn encode<__E: ::bincode::enc::Encoder>(
+        &self,
+        encoder: &mut __E,
+    ) -> Result<(), ::bincode::error::EncodeError> {
+        ::bincode::Encode::encode(&self.id, encoder)?;
+        ::bincode::Encode::encode(&self.wildcard_level, encoder)?;
+        ::bincode::Encode::encode(&self.is_symmetric, encoder)?;
+        ::bincode::Encode::encode(&self.is_antisymmetric, encoder)?;
+        ::bincode::Encode::encode(&self.is_cyclesymmetric, encoder)?;
+        ::bincode::Encode::encode(&self.is_linear, encoder)?;
+        Ok(())
+    }
+}
 impl std::fmt::Debug for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("{}", self.id))?;

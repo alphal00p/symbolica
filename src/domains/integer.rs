@@ -7,6 +7,12 @@ use std::{
     str::FromStr,
 };
 
+use bincode::{
+    de::read::Reader,
+    enc::write::Writer,
+    error::{DecodeError, EncodeError},
+    impl_borrow_decode, Decode, Encode,
+};
 use rand::Rng;
 use rug::{
     ops::{Pow, RemRounding},
@@ -67,6 +73,65 @@ pub enum Integer {
     Large(MultiPrecisionInteger),
 }
 
+impl Encode for Integer {
+    fn encode<E: bincode::enc::Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        match self {
+            Integer::Natural(val) => {
+                // Variant tag
+                0u8.encode(encoder)?;
+                val.encode(encoder)
+            }
+            Integer::Double(val) => {
+                1u8.encode(encoder)?;
+                val.encode(encoder)
+            }
+            Integer::Large(val) => {
+                2u8.encode(encoder)?;
+                // Convert the MultiPrecisionInteger to bytes.
+                // For rug::Integer, `to_digits` allows conversion to a Vec<u8>.
+                // Use Order::MsfBe for most-significant-first (big-endian).
+                let bytes = val.to_digits::<u8>(rug::integer::Order::MsfBe);
+
+                // Encode the length of the byte array
+                (bytes.len() as u64).encode(encoder)?;
+                encoder.writer().write(&bytes)
+            }
+        }
+    }
+}
+
+impl<C> Decode<C> for Integer {
+    fn decode<D: bincode::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, DecodeError> {
+        let variant = u8::decode(decoder)?;
+        match variant {
+            0 => {
+                let val = i64::decode(decoder)?;
+                Ok(Integer::Natural(val))
+            }
+            1 => {
+                let val = i128::decode(decoder)?;
+                Ok(Integer::Double(val))
+            }
+            2 => {
+                // Decode the length
+                let length = u64::decode(decoder)? as usize;
+                let mut bytes = vec![0u8; length];
+                decoder.reader().read(&mut bytes)?;
+
+                // Convert bytes back into a MultiPrecisionInteger
+                // For rug::Integer, from_digits can reconstruct from big-endian bytes:
+                let val = MultiPrecisionInteger::from_digits(&bytes, rug::integer::Order::MsfBe);
+                Ok(Integer::Large(val))
+            }
+            _ => Err(bincode::error::DecodeError::OtherString(format!(
+                "Invalid variant for Integer: {}",
+                variant
+            ))),
+        }
+    }
+}
+
+impl_borrow_decode!(Integer);
 impl InternalOrdering for Integer {
     fn internal_cmp(&self, other: &Self) -> std::cmp::Ordering {
         Ord::cmp(self, other)
