@@ -1166,10 +1166,11 @@ impl PythonTransformer {
         py.allow_threads(|| {
             Workspace::get_local()
                 .with(|workspace| {
-                    self.expr.substitute_wildcards(
+                    self.expr.replace_wildcards_with_matches_impl(
                         workspace,
                         &mut out,
-                        &MatchStack::new(&Condition::default(), &MatchSettings::default()),
+                        &MatchStack::new(),
+                        true,
                         None,
                     )
                 })
@@ -2067,7 +2068,7 @@ impl TryFrom<Relation> for PatternRestriction {
                         WildcardRestriction::Filter(Box::new(move |m| {
                             m.to_atom()
                                 .pattern_match(&pattern, Some(&cond), Some(&settings))
-                                .next()
+                                .next_detailed()
                                 .is_some()
                         })),
                     )))
@@ -4072,6 +4073,7 @@ impl PythonExpression {
     /// x^2 1
     /// 1 5
     /// ```
+    #[pyo3(signature = (*x,))]
     pub fn coefficient_list(
         &self,
         x: Bound<'_, PyTuple>,
@@ -5261,11 +5263,12 @@ impl PythonExpression {
     }
 
     /// Canonize (products of) tensors in the expression by relabeling repeated indices.
-    /// The tensors must be written as functions, with its indices are the arguments.
-    /// The repeated indices should be provided in `contracted_indices`.
+    /// The tensors must be written as functions, with its indices as the arguments.
+    /// Subexpressions, constants and open indices are supported.
     ///
     /// If the contracted indices are distinguishable (for example in their dimension),
-    /// you can provide an optional group marker for each index using `index_group`.
+    /// you can provide a group marker as the second element in the tuple of the index
+    /// specification.
     /// This makes sure that an index will not be renamed to an index from a different group.
     ///
     /// Examples
@@ -5276,38 +5279,20 @@ impl PythonExpression {
     /// >>>
     /// >>> e = g(mu2, mu3)*fc(mu4, mu2, k1, mu4, k1, mu3)
     /// >>>
-    /// >>> print(e.canonize_tensors([mu1, mu2, mu3, mu4]))
+    /// >>> print(e.canonize_tensors([(mu1, 0), (mu2, 0), (mu3, 0), (mu4, 0)]))
     /// yields `g(mu1,mu2)*fc(mu1,mu3,mu2,k1,mu3,k1)`.
-    #[pyo3(signature = (contracted_indices, index_group=None))]
     fn canonize_tensors(
         &self,
-        contracted_indices: Vec<ConvertibleToExpression>,
-        index_group: Option<Vec<ConvertibleToExpression>>,
+        contracted_indices: Vec<(ConvertibleToExpression, ConvertibleToExpression)>,
     ) -> PyResult<Self> {
         let contracted_indices = contracted_indices
             .into_iter()
-            .map(|x| x.to_expression().expr)
+            .map(|x| (x.0.to_expression().expr, x.1.to_expression().expr))
             .collect::<Vec<_>>();
-        let contracted_indices = contracted_indices
-            .iter()
-            .map(|x| x.as_view())
-            .collect::<Vec<_>>();
-
-        let index_group = index_group.map(|x| {
-            x.into_iter()
-                .map(|x| x.to_expression().expr)
-                .collect::<Vec<_>>()
-        });
-        let index_group = index_group
-            .as_ref()
-            .map(|x| x.iter().map(|x| x.as_view()).collect::<Vec<_>>());
 
         let r = self
             .expr
-            .canonize_tensors(
-                &contracted_indices,
-                index_group.as_ref().map(|x| x.as_slice()),
-            )
+            .canonize_tensors(&contracted_indices)
             .map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not canonize tensors: {}", e))
             })?;
@@ -5891,7 +5876,7 @@ impl PythonMatchIterator {
         self.with_dependent_mut(|_, i| {
             i.next().map(|m| {
                 m.into_iter()
-                    .map(|(k, v)| (Atom::new_var(k).into(), { v.to_atom().into() }))
+                    .map(|(k, v)| (Atom::new_var(k).into(), { v.into() }))
                     .collect()
             })
         })
@@ -10354,7 +10339,7 @@ impl PythonExpressionEvaluator {
         (function_name,
         filename,
         library_name,
-        inline_asm = true,
+        inline_asm = "default",
         optimization_level = 3,
         compiler_path = None,
     ))]
@@ -10363,7 +10348,7 @@ impl PythonExpressionEvaluator {
         function_name: &str,
         filename: &str,
         library_name: &str,
-        inline_asm: bool,
+        inline_asm: &str,
         optimization_level: u8,
         compiler_path: Option<&str>,
     ) -> PyResult<PythonCompiledExpressionEvaluator> {
@@ -10373,19 +10358,22 @@ impl PythonExpressionEvaluator {
             options.compiler = compiler_path.to_string();
         }
 
+        let inline_asm = match inline_asm.to_lowercase().as_str() {
+            "default" => InlineASM::default(),
+            "x64" => InlineASM::X64,
+            "aarch64" => InlineASM::AArch64,
+            "none" => InlineASM::None,
+            _ => {
+                return Err(exceptions::PyValueError::new_err(
+                    "Invalid inline assembly type specified.",
+                ))
+            }
+        };
+
         Ok(PythonCompiledExpressionEvaluator {
             eval: self
                 .eval
-                .export_cpp(
-                    filename,
-                    function_name,
-                    true,
-                    if inline_asm {
-                        InlineASM::X64
-                    } else {
-                        InlineASM::None
-                    },
-                )
+                .export_cpp(filename, function_name, true, inline_asm)
                 .map_err(|e| exceptions::PyValueError::new_err(format!("Export error: {}", e)))?
                 .compile(library_name, options)
                 .map_err(|e| {

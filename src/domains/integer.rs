@@ -323,8 +323,8 @@ impl std::fmt::Debug for Integer {
 impl ToFiniteField<u32> for Integer {
     fn to_finite_field(&self, field: &Zp) -> <Zp as Ring>::Element {
         match self {
-            &Integer::Natural(n) => field.to_element(n.rem_euclid(field.get_prime() as i64) as u32),
-            &Integer::Double(n) => field.to_element(n.rem_euclid(field.get_prime() as i128) as u32),
+            Integer::Natural(n) => field.to_element(n.rem_euclid(field.get_prime() as i64) as u32),
+            Integer::Double(n) => field.to_element(n.rem_euclid(field.get_prime() as i128) as u32),
             Integer::Large(r) => field.to_element(r.mod_u(field.get_prime())),
         }
     }
@@ -836,11 +836,11 @@ impl Integer {
 
     /// Perform the symmetric mod `p` on `self`.
     #[inline]
-    pub fn symmetric_mod(&self, p: &Integer) -> Integer {
+    pub fn symmetric_mod(self, p: &Integer) -> Integer {
         let c = self % p;
 
-        if &c * &2u64.into() > *p {
-            &c - p
+        if &c + &c > *p {
+            c - p
         } else {
             c
         }
@@ -1194,12 +1194,8 @@ impl Ring for IntegerRing {
     }
 
     #[inline]
-    fn nth(&self, n: u64) -> Self::Element {
-        if n <= i64::MAX as u64 {
-            Integer::Natural(n as i64)
-        } else {
-            Integer::Double(n as i128)
-        }
+    fn nth(&self, n: Integer) -> Self::Element {
+        n
     }
 
     #[inline]
@@ -1235,6 +1231,19 @@ impl Ring for IntegerRing {
 
     fn size(&self) -> Integer {
         0.into()
+    }
+
+    fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
+        if b.is_zero() {
+            return None;
+        }
+
+        let r = a / b;
+        if *a == &r * b {
+            Some(r)
+        } else {
+            None
+        }
     }
 
     fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
@@ -2084,7 +2093,7 @@ impl Rem<Integer> for Integer {
     type Output = Integer;
 
     fn rem(self, rhs: Self) -> Self::Output {
-        &self % &rhs
+        self % &rhs
     }
 }
 
@@ -2092,7 +2101,20 @@ impl<'a> Rem<&'a Integer> for Integer {
     type Output = Integer;
 
     fn rem(self, rhs: &'a Self) -> Self::Output {
-        &self % rhs
+        if rhs.is_zero() {
+            panic!("Cannot divide by zero");
+        }
+
+        if !self.is_negative() && self < *rhs {
+            return self;
+        }
+
+        match (self, rhs) {
+            (Integer::Large(a), Integer::Natural(b)) => Integer::from(a.rem_euc(b)),
+            (Integer::Large(a), Integer::Double(b)) => Integer::from(a.rem_euc(b)),
+            (Integer::Large(a), Integer::Large(b)) => Integer::from(a.rem_euc(b)),
+            (x, _) => (&x).rem(rhs),
+        }
     }
 }
 
@@ -2110,6 +2132,10 @@ impl<'a> Rem for &'a Integer {
     fn rem(self, rhs: Self) -> Self::Output {
         if rhs.is_zero() {
             panic!("Cannot divide by zero");
+        }
+
+        if !self.is_negative() && self < rhs {
+            return self.clone();
         }
 
         match (self, rhs) {
@@ -2168,12 +2194,8 @@ impl<'a> Rem for &'a Integer {
                     Integer::zero()
                 }
             }
-            (Integer::Large(a), Integer::Natural(b)) => {
-                Integer::from(a.rem_euc(MultiPrecisionInteger::from(*b)))
-            }
-            (Integer::Large(a), Integer::Double(b)) => {
-                Integer::from(a.rem_euc(MultiPrecisionInteger::from(*b)))
-            }
+            (Integer::Large(a), Integer::Natural(b)) => Integer::from(a.rem_euc(b).complete()),
+            (Integer::Large(a), Integer::Double(b)) => Integer::from(a.rem_euc(b).complete()),
             (Integer::Large(a), Integer::Large(b)) => Integer::from(a.rem_euc(b).complete()),
         }
     }
@@ -2266,8 +2288,8 @@ impl Ring for MultiPrecisionIntegerRing {
     }
 
     #[inline]
-    fn nth(&self, n: u64) -> Self::Element {
-        MultiPrecisionInteger::from(n)
+    fn nth(&self, n: Integer) -> Self::Element {
+        n.to_multi_prec()
     }
 
     #[inline]
@@ -2298,6 +2320,20 @@ impl Ring for MultiPrecisionIntegerRing {
 
     fn size(&self) -> Integer {
         0.into()
+    }
+
+    fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
+        if b.is_zero() {
+            return None;
+        }
+
+        let (r, q) = a.div_rem_ref(b).complete();
+
+        if q.is_zero() {
+            Some(r)
+        } else {
+            None
+        }
     }
 
     fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
