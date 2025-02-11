@@ -11,6 +11,7 @@ devenv.local.nix
 # direnv
 .direnv
 .devenv
+symbolica.so
 
 # pre-commit
 .pre-commit-config.yaml
