@@ -5,3 +5,4 @@ flake.nix
 .envrc
 .direnv/
 patch_symbolica.py
+symbolica_path.txt
