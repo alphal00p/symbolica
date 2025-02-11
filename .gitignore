@@ -1,8 +1,16 @@
 Cargo.lock
 target/
-flake.lock
-flake.nix
+#flake.lock
+#flake.nix
 .envrc
 .direnv/
 patch_symbolica.py
 symbolica_path.txt
+.devenv/*
+devenv.local.nix
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
