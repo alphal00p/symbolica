@@ -32,7 +32,7 @@ use crate::{
 };
 
 /// A node in a graph, with arbitrary data.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Node<NodeData = Empty> {
     /// Arbitrary data associated with the node.
     pub data: NodeData,
@@ -41,7 +41,7 @@ pub struct Node<NodeData = Empty> {
 }
 
 /// An edge in a graph, with arbitrary data.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Edge<EdgeData = Empty> {
     /// Indices of the vertices connected by the edge.
     pub vertices: (usize, usize),
