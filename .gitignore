@@ -6,12 +6,14 @@ target/
 .direnv/
 patch_symbolica.py
 symbolica_path.txt
-.devenv/
+.devenv/*
 devenv.local.nix
 # direnv
 .direnv
 .devenv
 symbolica.so
-
+devenv*
+.devenv.flake.nix
 # pre-commit
 .pre-commit-config.yaml
+.zed/
