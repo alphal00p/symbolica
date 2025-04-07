@@ -908,6 +908,12 @@ impl<'a> AtomOrView<'a> {
     }
 }
 
+impl<'a> From<AtomView<'a>> for Atom {
+    fn from(value: AtomView<'a>) -> Self {
+        value.to_owned()
+    }
+}
+
 impl<'a> AtomView<'a> {
     pub fn to_owned(&self) -> Atom {
         let mut a = Atom::default();
