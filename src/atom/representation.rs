@@ -179,9 +179,12 @@ impl UserDataKey {
                 Ok(UserDataKey::String(s))
             }
             3 => {
-                let mut a = Atom::new();
-                a.read(source)?;
-                Ok(UserDataKey::Atom(a))
+                // User-data atoms are embedded in an already stateful stream. Read
+                // only the stateless atom payload here; `State::import` remaps it
+                // after all referenced symbols have been registered.
+                let mut data = Atom::new();
+                data.read(source)?;
+                Ok(UserDataKey::Atom(data))
             }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1979,8 +1982,7 @@ impl<'a> AtomView<'a> {
     /// with [Atom::import].
     #[inline(always)]
     pub fn export<W: Write>(&self, dest: &mut W) -> Result<(), std::io::Error> {
-        let active_symbols = self.get_all_symbols(true);
-        State::export_partial(dest, active_symbols)?;
+        State::export_partial_atom(dest, *self)?;
 
         dest.write_u64::<LittleEndian>(1)?; // export a single expression
 

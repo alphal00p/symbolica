@@ -2015,10 +2015,30 @@ impl Symbol {
         state: PrintState,
         f: &mut W,
     ) -> Result<(), std::fmt::Error> {
+        self.format_impl(opts, state, f, true)
+    }
+
+    pub(crate) fn format_without_custom_print<W: std::fmt::Write>(
+        &self,
+        opts: &PrintOptions,
+        state: PrintState,
+        f: &mut W,
+    ) -> Result<(), std::fmt::Error> {
+        self.format_impl(opts, state, f, false)
+    }
+
+    fn format_impl<W: std::fmt::Write>(
+        &self,
+        opts: &PrintOptions,
+        state: PrintState,
+        f: &mut W,
+        use_custom_print: bool,
+    ) -> Result<(), std::fmt::Error> {
         let data = self.get_global_data();
         let (namespace, name) = (&data.namespace, &data.name[data.namespace.len() + 2..]);
 
-        if let Some(custom_print) = &data.custom_print
+        if use_custom_print
+            && let Some(custom_print) = &data.custom_print
             && let Some(s) = custom_print(InlineVar::new(*self).as_view(), opts, &state)
         {
             f.write_str(&s)?;
