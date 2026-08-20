@@ -3440,8 +3440,9 @@ impl PythonExpression {
     ///     Custom user data to associate with the symbol.
     #[gen_stub(skip)]
     #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_flat=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None, print=None, derivative=None, series=None, eval=None, data=None))]
+    #[pyo3(name = "symbol")]
     #[classmethod]
-    pub fn symbol(
+    pub(crate) fn py_symbol(
         _cls: &Bound<'_, PyType>,
         py: Python,
         names: &Bound<'_, PyTuple>,
@@ -8784,6 +8785,56 @@ impl PythonExpression {
                 .map(|(t, g)| (t.into(), g.into()))
                 .collect(),
         ))
+    }
+}
+
+// Rust API compatibility for extensions that still pass a Transformer directly.
+impl PythonExpression {
+    #[allow(clippy::too_many_arguments)]
+    pub fn symbol(
+        cls: &Bound<'_, PyType>,
+        py: Python,
+        names: &Bound<'_, PyTuple>,
+        is_symmetric: Option<bool>,
+        is_antisymmetric: Option<bool>,
+        is_cyclesymmetric: Option<bool>,
+        is_linear: Option<bool>,
+        is_flat: Option<bool>,
+        is_scalar: Option<bool>,
+        is_real: Option<bool>,
+        is_integer: Option<bool>,
+        is_positive: Option<bool>,
+        tags: Option<Vec<String>>,
+        aliases: Option<Vec<String>>,
+        normalization: Option<PythonTransformer>,
+        print: Option<Py<PyAny>>,
+        derivative: Option<Py<PyAny>>,
+        series: Option<Py<PyAny>>,
+        eval: Option<Py<PyAny>>,
+        data: Option<PythonUserData>,
+    ) -> PyResult<Py<PyAny>> {
+        Self::py_symbol(
+            cls,
+            py,
+            names,
+            is_symmetric,
+            is_antisymmetric,
+            is_cyclesymmetric,
+            is_linear,
+            is_flat,
+            is_scalar,
+            is_real,
+            is_integer,
+            is_positive,
+            tags,
+            aliases,
+            normalization.map(PythonNormalization::Transformer),
+            print,
+            derivative,
+            series,
+            eval,
+            data,
+        )
     }
 }
 

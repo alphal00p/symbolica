@@ -1559,7 +1559,7 @@ fn symbol_shorthand(
     data: Option<PythonUserData>,
     py: Python,
 ) -> PyResult<Py<PyAny>> {
-    PythonExpression::symbol(
+    PythonExpression::py_symbol(
         &PythonExpression::type_object(py),
         py,
         names,
