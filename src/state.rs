@@ -19,9 +19,11 @@ use byteorder::LittleEndian;
 use smartstring::alias::String;
 
 use crate::atom::{
-    DerivativeFunction, EvaluationInfo, NamespacedSymbol, NormalizationFunction,
-    SeriesExpansionFunction, SymbolAttribute, SymbolBuilder, UserData,
+    AtomCore, AtomView, DerivativeFunction, EvaluationInfo, NamespacedSymbol,
+    NormalizationFunction, SeriesExpansionFunction, SymbolAttribute, SymbolBuilder, UserData,
+    UserDataKey,
 };
+use crate::coefficient::CoefficientView;
 use crate::domains::finite_field::Zp64;
 use crate::poly::PolyVariable;
 use crate::printer::PrintFunction;
@@ -72,6 +74,344 @@ impl StateMap {
     pub fn is_empty(&self) -> bool {
         self.symbols.is_empty() && self.finite_fields.is_empty() && self.variables_lists.is_empty()
     }
+}
+
+struct ImportedSymbol {
+    index: u32,
+    name: std::string::String,
+    namespace: std::string::String,
+    attributes: Vec<SymbolAttribute>,
+    tags: Vec<std::string::String>,
+    user_data: UserData,
+    aliases: Vec<std::string::String>,
+    is_exportable: bool,
+}
+
+enum ImportedPolyVariable {
+    Symbol(u32),
+    Temporary(usize),
+    Function(u32, Atom),
+    Power(Atom),
+}
+
+struct ImportedVariableList {
+    index: u64,
+    variables: Vec<ImportedPolyVariable>,
+}
+
+#[derive(Default)]
+struct StateDependencies {
+    symbols: HashSet<u32>,
+    variable_lists: HashSet<u64>,
+}
+
+impl StateDependencies {
+    fn add_atom(&mut self, atom: AtomView<'_>) {
+        self.symbols.extend(
+            atom.get_all_symbols(true)
+                .into_iter()
+                .map(|symbol| symbol.get_id()),
+        );
+        self.add_atom_variable_lists(atom);
+    }
+
+    fn add_atom_variable_lists(&mut self, atom: AtomView<'_>) {
+        match atom {
+            AtomView::Num(number) => {
+                if let CoefficientView::RationalPolynomial(polynomial) = number.get_coeff_view() {
+                    self.variable_lists.insert(polynomial.variable_list_index());
+                }
+            }
+            AtomView::Var(_) => {}
+            AtomView::Fun(function) => {
+                for argument in function {
+                    self.add_atom_variable_lists(argument);
+                }
+            }
+            AtomView::Pow(power) => {
+                let (base, exponent) = power.get_base_exp();
+                self.add_atom_variable_lists(base);
+                self.add_atom_variable_lists(exponent);
+            }
+            AtomView::Mul(product) => {
+                for factor in product {
+                    self.add_atom_variable_lists(factor);
+                }
+            }
+            AtomView::Add(sum) => {
+                for term in sum {
+                    self.add_atom_variable_lists(term);
+                }
+            }
+        }
+    }
+
+    fn add_user_data(&mut self, data: &UserData) {
+        match data {
+            UserData::None
+            | UserData::Integer(_)
+            | UserData::String(_)
+            | UserData::Serialized(_) => {}
+            UserData::Atom(atom) => self.add_atom(atom.as_view()),
+            UserData::List(list) => {
+                for item in list {
+                    self.add_user_data(item);
+                }
+            }
+            UserData::Map(map) => {
+                for (key, value) in map {
+                    if let UserDataKey::Atom(atom) = key {
+                        self.add_atom(atom.as_view());
+                    }
+                    self.add_user_data(value);
+                }
+            }
+        }
+    }
+
+    fn add_imported_variable(&mut self, variable: &ImportedPolyVariable) {
+        match variable {
+            ImportedPolyVariable::Symbol(symbol) => {
+                self.symbols.insert(*symbol);
+            }
+            ImportedPolyVariable::Temporary(_) => {}
+            ImportedPolyVariable::Function(symbol, atom) => {
+                self.symbols.insert(*symbol);
+                self.add_atom(atom.as_view());
+            }
+            ImportedPolyVariable::Power(atom) => self.add_atom(atom.as_view()),
+        }
+    }
+}
+
+fn collect_variable_symbols(variable: &PolyVariable, symbols: &mut HashSet<Symbol>) {
+    match variable {
+        PolyVariable::Symbol(symbol) => {
+            symbols.insert(*symbol);
+        }
+        PolyVariable::Temporary(_) => {}
+        PolyVariable::Function(symbol, atom) => {
+            symbols.insert(*symbol);
+            symbols.extend(atom.get_all_symbols(true));
+        }
+        PolyVariable::Power(atom) => symbols.extend(atom.get_all_symbols(true)),
+    }
+}
+
+fn collect_export_symbols(
+    initial: &HashSet<Symbol>,
+    initial_variable_lists: &HashSet<u64>,
+) -> Result<HashSet<Symbol>, std::io::Error> {
+    fn visit(
+        symbol: Symbol,
+        visiting: &mut HashSet<u32>,
+        visited: &mut HashSet<u32>,
+        output: &mut HashSet<Symbol>,
+        variable_lists: &mut HashSet<u64>,
+    ) -> Result<(), std::io::Error> {
+        let id = symbol.get_id();
+        if visited.contains(&id) {
+            return Ok(());
+        }
+        if !visiting.insert(id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Cyclic symbol user data involving {}", symbol.get_name()),
+            ));
+        }
+
+        let mut dependencies = HashSet::default();
+        symbol.get_data().get_symbols(&mut dependencies);
+        let mut state_dependencies = StateDependencies::default();
+        state_dependencies.add_user_data(symbol.get_data());
+        variable_lists.extend(state_dependencies.variable_lists);
+        for dependency in dependencies {
+            visit(dependency, visiting, visited, output, variable_lists)?;
+        }
+
+        visiting.remove(&id);
+        visited.insert(id);
+        output.insert(symbol);
+        Ok(())
+    }
+
+    let mut output = HashSet::default();
+    let mut visiting = HashSet::default();
+    let mut visited = HashSet::default();
+    let mut pending_variable_lists = initial_variable_lists.clone();
+    for symbol in initial {
+        visit(
+            *symbol,
+            &mut visiting,
+            &mut visited,
+            &mut output,
+            &mut pending_variable_lists,
+        )?;
+    }
+
+    let mut visited_variable_lists = HashSet::default();
+    while let Some(index) = pending_variable_lists
+        .iter()
+        .find(|index| !visited_variable_lists.contains(*index))
+        .copied()
+    {
+        if index as usize >= VARIABLE_LISTS.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Expression references missing variable list {index}"),
+            ));
+        }
+        let variables = &VARIABLE_LISTS[index as usize];
+        visited_variable_lists.insert(index);
+
+        let mut symbols = HashSet::default();
+        let mut state_dependencies = StateDependencies::default();
+        for variable in variables.iter() {
+            collect_variable_symbols(variable, &mut symbols);
+            match variable {
+                PolyVariable::Symbol(_) | PolyVariable::Temporary(_) => {}
+                PolyVariable::Function(_, atom) | PolyVariable::Power(atom) => {
+                    state_dependencies.add_atom(atom.as_view());
+                }
+            }
+        }
+        pending_variable_lists.extend(state_dependencies.variable_lists);
+        for symbol in symbols {
+            visit(
+                symbol,
+                &mut visiting,
+                &mut visited,
+                &mut output,
+                &mut pending_variable_lists,
+            )?;
+        }
+    }
+    Ok(output)
+}
+
+fn register_imported_symbol(
+    record: ImportedSymbol,
+    state_map: &StateMap,
+    conflict_fn: Option<&dyn Fn(&str) -> String>,
+) -> Result<Symbol, std::io::Error> {
+    let ImportedSymbol {
+        index: _,
+        mut name,
+        namespace,
+        attributes,
+        tags,
+        user_data,
+        aliases,
+        is_exportable,
+    } = record;
+    let user_data = user_data.rename_symbols(state_map);
+    let mut attempted_names = HashSet::default();
+    attempted_names.insert(name.clone());
+
+    loop {
+        let num_symbols = ID_TO_STR.len();
+        match SymbolBuilder::new(NamespacedSymbol {
+            symbol: name.clone().into(),
+            namespace: namespace.clone().into(),
+            file: "".into(),
+            line: 0,
+        })
+        .with_attributes(attributes.clone())
+        .with_tags(tags.clone())
+        .with_user_data(user_data.clone())
+        .with_aliases(aliases.clone())
+        .build()
+        {
+            Ok(symbol) => {
+                if !is_exportable && num_symbols != ID_TO_STR.len() {
+                    warn!(
+                        "Imported symbol {name} was previously defined with user-defined functions, but the imported version does not have any."
+                    );
+                }
+                return Ok(symbol);
+            }
+            Err(error) => {
+                let Some(rename) = conflict_fn else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Symbol conflict: {error}"),
+                    ));
+                };
+
+                let new_name = rename(&name).to_string();
+                let wildcard_level = |value: &str| {
+                    value
+                        .chars()
+                        .rev()
+                        .take_while(|character| *character == '_')
+                        .count()
+                };
+                if wildcard_level(&name) != wildcard_level(&new_name) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "Conflict resolver changed the wildcard level of symbol {name} to {new_name}"
+                        ),
+                    ));
+                }
+                if !attempted_names.insert(new_name.clone()) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "Conflict resolver produced a repeated name while importing symbol {name}: {new_name}"
+                        ),
+                    ));
+                }
+                name = new_name;
+            }
+        }
+    }
+}
+
+fn resolve_variable_list(
+    record: ImportedVariableList,
+    resolved_symbols: &HashMap<u32, Symbol>,
+    state_map: &StateMap,
+) -> Result<Arc<Vec<PolyVariable>>, std::io::Error> {
+    let mut variables = Vec::with_capacity(record.variables.len());
+    for variable in record.variables {
+        match variable {
+            ImportedPolyVariable::Symbol(id) => {
+                let symbol = resolved_symbols.get(&id).copied().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "Variable list {} references unresolved symbol id {id}",
+                            record.index
+                        ),
+                    )
+                })?;
+                variables.push(PolyVariable::Symbol(symbol));
+            }
+            ImportedPolyVariable::Temporary(value) => {
+                variables.push(PolyVariable::Temporary(value));
+            }
+            ImportedPolyVariable::Function(id, atom) => {
+                let symbol = resolved_symbols.get(&id).copied().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "Variable list {} references unresolved function id {id}",
+                            record.index
+                        ),
+                    )
+                })?;
+                variables.push(PolyVariable::Function(
+                    symbol,
+                    atom.as_view().rename(state_map),
+                ));
+            }
+            ImportedPolyVariable::Power(atom) => {
+                variables.push(PolyVariable::Power(atom.as_view().rename(state_map)));
+            }
+        }
+    }
+    Ok(Arc::new(variables))
 }
 
 pub(crate) struct SymbolData {
@@ -1178,6 +1518,9 @@ impl State {
             Self::initialize_state();
         }
 
+        let all_symbols: HashSet<_> = State::symbol_iter().map(|(symbol, _)| symbol).collect();
+        collect_export_symbols(&all_symbols, &HashSet::default())?;
+
         dest.write_u32::<LittleEndian>(SYMBOLICA_MAGIC)?;
         dest.write_u16::<LittleEndian>(EXPORT_FORMAT_VERSION)?;
         dest.write_u8(FULL_STATE_EXPORT_FLAG)?;
@@ -1224,38 +1567,35 @@ impl State {
         Ok(())
     }
 
-    /// Get the dependent symbols of a set of symbols.
-    fn get_dependent_symbols(mut symbols: HashSet<Symbol>) -> HashSet<Symbol> {
-        let mut data_symbols = HashSet::new();
-        for x in symbols.iter() {
-            x.get_data().get_symbols(&mut data_symbols);
-        }
-
-        let mut new_data_symbols = HashSet::new();
-        while !data_symbols.is_empty() {
-            for x in data_symbols.iter() {
-                x.get_data().get_symbols(&mut new_data_symbols);
-            }
-
-            symbols.extend(data_symbols.drain());
-            (data_symbols, new_data_symbols) = (new_data_symbols, data_symbols);
-        }
-
-        symbols
-    }
-
     /// Write the state of a part of the symbol table to a binary stream.
     #[inline(always)]
     pub fn export_partial<W: Write>(
         dest: &mut W,
-        mut symbols: HashSet<Symbol>,
+        symbols: HashSet<Symbol>,
+    ) -> Result<(), std::io::Error> {
+        Self::export_partial_with_variable_lists(dest, &symbols, &HashSet::default())
+    }
+
+    pub(crate) fn export_partial_atom<W: Write>(
+        dest: &mut W,
+        atom: AtomView<'_>,
+    ) -> Result<(), std::io::Error> {
+        let mut dependencies = StateDependencies::default();
+        dependencies.add_atom(atom);
+        let symbols = atom.get_all_symbols(true);
+        Self::export_partial_with_variable_lists(dest, &symbols, &dependencies.variable_lists)
+    }
+
+    fn export_partial_with_variable_lists<W: Write>(
+        dest: &mut W,
+        symbols: &HashSet<Symbol>,
+        variable_lists: &HashSet<u64>,
     ) -> Result<(), std::io::Error> {
         if ID_TO_STR.len() == 0 {
             Self::initialize_state();
         }
 
-        symbols = Self::get_dependent_symbols(symbols);
-
+        let symbols = collect_export_symbols(symbols, variable_lists)?;
         dest.write_u32::<LittleEndian>(SYMBOLICA_MAGIC)?;
         dest.write_u16::<LittleEndian>(EXPORT_FORMAT_VERSION)?;
         dest.write_u8(!FULL_STATE_EXPORT_FLAG)?;
@@ -1332,12 +1672,6 @@ impl State {
             ));
         }
 
-        let mut state_map = StateMap {
-            symbols: HashMap::default(),
-            finite_fields: HashMap::default(),
-            variables_lists: HashMap::default(),
-        };
-
         let is_full_state = if version > 4 {
             source.read_u8()? == FULL_STATE_EXPORT_FLAG
         } else {
@@ -1345,77 +1679,33 @@ impl State {
         };
 
         let n_symbols = source.read_u64::<LittleEndian>()?;
+        let mut imported_symbols = Vec::with_capacity(n_symbols as usize);
         for mut index in 0..n_symbols {
             if !is_full_state {
                 index = source.read_u32::<LittleEndian>()? as u64
             }
-
-            let (mut name, namespace, attributes, tags, mut extra_data, aliases, is_exportable) =
-                Symbol::import_impl(source)?;
-
-            // all symbols in user data have a lower id than `index`, so we can safely rename
-            extra_data = extra_data.rename_symbols(&state_map);
-
-            loop {
-                let num_symbols = ID_TO_STR.len();
-                match SymbolBuilder::new(NamespacedSymbol {
-                    symbol: name.clone().into(),
-                    namespace: namespace.to_string().into(),
-                    file: "".into(),
-                    line: 0,
-                })
-                .with_attributes(attributes.clone())
-                .with_tags(tags.clone())
-                .with_user_data(extra_data.clone())
-                .with_aliases(aliases.clone())
-                .build()
-                {
-                    Ok(id) => {
-                        if !is_exportable && num_symbols != ID_TO_STR.len() {
-                            warn!(
-                                "Imported symbol {name} was previously defined with user-defined functions, but the imported version does not have any."
-                            );
-                        }
-
-                        if index as u32 != id.get_id() {
-                            state_map.symbols.insert(index as u32, id);
-                        }
-                        break;
-                    }
-                    Err(e) => {
-                        if let Some(f) = &conflict_fn {
-                            let new_name = f(&name);
-
-                            let mut old_wildcard_level = 0;
-                            for x in name.chars().rev() {
-                                if x != '_' {
-                                    break;
-                                }
-                                old_wildcard_level += 1;
-                            }
-
-                            let mut new_wildcard_level = 0;
-                            for x in new_name.chars().rev() {
-                                if x != '_' {
-                                    break;
-                                }
-                                new_wildcard_level += 1;
-                            }
-
-                            if old_wildcard_level == new_wildcard_level {
-                                name = new_name.to_string();
-                            }
-                        } else {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("Symbol conflict: {e}"),
-                            ));
-                        }
-                    }
-                }
+            if index > u32::MAX as u64 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Symbol index {index} does not fit in the v5 symbol id space"),
+                ));
             }
+
+            let (name, namespace, attributes, tags, user_data, aliases, is_exportable) =
+                Symbol::import_impl(source)?;
+            imported_symbols.push(Some(ImportedSymbol {
+                index: index as u32,
+                name,
+                namespace,
+                attributes,
+                tags,
+                user_data,
+                aliases,
+                is_exportable,
+            }));
         }
 
+        let mut state_map = StateMap::default();
         let n_finite_fields = source.read_u64::<LittleEndian>()?;
         for x in 0..n_finite_fields {
             let prime = source.read_u64::<LittleEndian>()?;
@@ -1428,43 +1718,30 @@ impl State {
         }
 
         let n_variable_lists = source.read_u64::<LittleEndian>()?;
+        let mut imported_variable_lists = Vec::with_capacity(n_variable_lists as usize);
         for x in 0..n_variable_lists {
             let n_vars = source.read_u64::<LittleEndian>()?;
-            let mut variables = vec![];
+            let mut variables = Vec::with_capacity(n_vars as usize);
             for _ in 0..n_vars {
                 match source.read_u8()? {
                     0 => {
                         let id = source.read_u32::<LittleEndian>()?;
-                        if let Some(new_id) = state_map.symbols.get(&id) {
-                            variables.push(PolyVariable::Symbol(*new_id));
-                        } else {
-                            variables.push(PolyVariable::Symbol(ID_TO_STR[id as usize].0))
-                        }
+                        variables.push(ImportedPolyVariable::Symbol(id));
                     }
                     1 => {
                         let u = source.read_u64::<LittleEndian>()?;
-                        variables.push(PolyVariable::Temporary(u as usize))
+                        variables.push(ImportedPolyVariable::Temporary(u as usize));
                     }
                     2 => {
                         let id = source.read_u32::<LittleEndian>()?;
-                        let symb = if let Some(new_id) = state_map.symbols.get(&id) {
-                            *new_id
-                        } else {
-                            ID_TO_STR[id as usize].0
-                        };
-
                         let mut f = Atom::new();
                         f.read(&mut *source)?;
-
-                        let f_r = f.as_view().rename(&state_map);
-                        variables.push(PolyVariable::Function(symb, f_r));
+                        variables.push(ImportedPolyVariable::Function(id, f));
                     }
                     3 => {
                         let mut f = Atom::new();
                         f.read(&mut *source)?;
-
-                        let f_r = f.as_view().rename(&state_map);
-                        variables.push(PolyVariable::Power(f_r));
+                        variables.push(ImportedPolyVariable::Power(f));
                     }
                     _ => {
                         return Err(std::io::Error::new(
@@ -1474,12 +1751,179 @@ impl State {
                     }
                 }
             }
+            imported_variable_lists.push(Some(ImportedVariableList {
+                index: x,
+                variables,
+            }));
+        }
 
-            // see if variables are seen before
-            let vars = Arc::new(variables);
-            let new_id = State::get_or_insert_variable_list(vars.clone());
-            if x != new_id.0 as u64 {
-                state_map.variables_lists.insert(x, vars);
+        let imported_symbol_ids: HashSet<_> = imported_symbols
+            .iter()
+            .flatten()
+            .map(|record| record.index)
+            .collect();
+        if imported_symbol_ids.len() != imported_symbols.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "State contains duplicate symbol indices",
+            ));
+        }
+        for record in imported_symbols.iter().flatten() {
+            let mut dependencies = StateDependencies::default();
+            dependencies.add_user_data(&record.user_data);
+            if let Some(id) = dependencies
+                .symbols
+                .iter()
+                .find(|id| !imported_symbol_ids.contains(id))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "User data for symbol {} references non-exported symbol id {id}",
+                        record.name
+                    ),
+                ));
+            }
+            if let Some(index) = dependencies
+                .variable_lists
+                .iter()
+                .find(|index| **index >= n_variable_lists)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "User data for symbol {} references missing variable list {index}",
+                        record.name
+                    ),
+                ));
+            }
+        }
+        // A v5 partial state still contains the process's complete variable-list
+        // table. Lists unrelated to the exported expression may consequently
+        // reference symbols omitted from the partial symbol table. Ignore those
+        // unreachable lists, while retaining every closed list for dependency
+        // resolution and cycle detection.
+        let mut available_variable_lists: HashSet<_> = (0..n_variable_lists).collect();
+        loop {
+            let previous_len = available_variable_lists.len();
+            for record in imported_variable_lists.iter().flatten() {
+                if !available_variable_lists.contains(&record.index) {
+                    continue;
+                }
+                let mut dependencies = StateDependencies::default();
+                for variable in &record.variables {
+                    dependencies.add_imported_variable(variable);
+                }
+                if !dependencies
+                    .symbols
+                    .iter()
+                    .all(|id| imported_symbol_ids.contains(id))
+                    || !dependencies
+                        .variable_lists
+                        .iter()
+                        .all(|index| available_variable_lists.contains(index))
+                {
+                    available_variable_lists.remove(&record.index);
+                }
+            }
+            if available_variable_lists.len() == previous_len {
+                break;
+            }
+        }
+        for pending in &mut imported_variable_lists {
+            if pending
+                .as_ref()
+                .is_some_and(|record| !available_variable_lists.contains(&record.index))
+            {
+                *pending = None;
+            }
+        }
+
+        let mut resolved_symbols = HashMap::default();
+        let mut resolved_variable_lists = HashMap::default();
+        let mut remaining = imported_symbols.iter().flatten().count()
+            + imported_variable_lists.iter().flatten().count();
+        while remaining != 0 {
+            let mut progress = false;
+
+            for pending in &mut imported_symbols {
+                let Some(record) = pending.as_ref() else {
+                    continue;
+                };
+                let mut dependencies = StateDependencies::default();
+                dependencies.add_user_data(&record.user_data);
+                if !dependencies
+                    .symbols
+                    .iter()
+                    .all(|id| resolved_symbols.contains_key(id))
+                    || !dependencies
+                        .variable_lists
+                        .iter()
+                        .all(|index| resolved_variable_lists.contains_key(index))
+                {
+                    continue;
+                }
+
+                let record = pending.take().unwrap();
+                let old_index = record.index;
+                let symbol = register_imported_symbol(record, &state_map, conflict_fn.as_deref())?;
+                resolved_symbols.insert(old_index, symbol);
+                if old_index != symbol.get_id() {
+                    state_map.symbols.insert(old_index, symbol);
+                }
+                remaining -= 1;
+                progress = true;
+            }
+
+            for pending in &mut imported_variable_lists {
+                let Some(record) = pending.as_ref() else {
+                    continue;
+                };
+                let mut dependencies = StateDependencies::default();
+                for variable in &record.variables {
+                    dependencies.add_imported_variable(variable);
+                }
+                if !dependencies
+                    .symbols
+                    .iter()
+                    .all(|id| resolved_symbols.contains_key(id))
+                    || !dependencies
+                        .variable_lists
+                        .iter()
+                        .all(|index| resolved_variable_lists.contains_key(index))
+                {
+                    continue;
+                }
+
+                let record = pending.take().unwrap();
+                let old_index = record.index;
+                let variables = resolve_variable_list(record, &resolved_symbols, &state_map)?;
+                let new_index = State::get_or_insert_variable_list(variables.clone());
+                resolved_variable_lists.insert(old_index, variables.clone());
+                if old_index != new_index.0 as u64 {
+                    state_map.variables_lists.insert(old_index, variables);
+                }
+                remaining -= 1;
+                progress = true;
+            }
+
+            if !progress {
+                let pending_symbols: Vec<_> = imported_symbols
+                    .iter()
+                    .flatten()
+                    .map(|record| record.name.as_str())
+                    .collect();
+                let pending_variable_lists: Vec<_> = imported_variable_lists
+                    .iter()
+                    .flatten()
+                    .map(|record| record.index)
+                    .collect();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Cyclic state dependencies while importing symbols {pending_symbols:?} and variable lists {pending_variable_lists:?}"
+                    ),
+                ));
             }
         }
 
@@ -1651,14 +2095,16 @@ impl Drop for RecycledAtom {
 
 #[cfg(test)]
 mod tests {
+    use byteorder::{LittleEndian, WriteBytesExt};
+
     use crate::{
-        atom::{Atom, AtomCore, AtomView, InlineVar, NormalizationFunction, Symbol},
+        atom::{Atom, AtomCore, AtomView, InlineVar, NormalizationFunction, Symbol, UserData},
         parse,
         printer::PrintFunction,
         symbol, wrap_symbol,
     };
 
-    use super::{CustomFunctionDefinitionKeys, State};
+    use super::{CustomFunctionDefinitionKeys, EXPORT_FORMAT_VERSION, SYMBOLICA_MAGIC, State};
 
     fn test_print_function() -> PrintFunction {
         Box::new(|_, _, _| Some("test".into()))
@@ -1668,6 +2114,32 @@ mod tests {
         Box::new(|_, _| {})
     }
 
+    fn write_v5_symbol(output: &mut Vec<u8>, index: u32, name: &str, user_data: &UserData) {
+        output.write_u32::<LittleEndian>(index).unwrap();
+        output.write_u32::<LittleEndian>(name.len() as u32).unwrap();
+        output.extend_from_slice(name.as_bytes());
+        let namespace = name.rsplit_once("::").unwrap().0;
+        output
+            .write_u32::<LittleEndian>(namespace.len() as u32)
+            .unwrap();
+        output.extend_from_slice(namespace.as_bytes());
+        output.write_u8(0).unwrap(); // symbol flags
+        output.write_u32::<LittleEndian>(0).unwrap(); // extra symbol flags
+        output.write_u16::<LittleEndian>(0).unwrap(); // tags
+        output.write_u16::<LittleEndian>(0).unwrap(); // aliases
+        user_data.write(output).unwrap();
+        output.write_u8(1).unwrap(); // exportable
+    }
+
+    fn v5_partial_state_header(symbol_count: u64) -> Vec<u8> {
+        let mut output = vec![];
+        output.write_u32::<LittleEndian>(SYMBOLICA_MAGIC).unwrap();
+        output.write_u16::<LittleEndian>(5).unwrap();
+        output.write_u8(0).unwrap(); // partial state
+        output.write_u64::<LittleEndian>(symbol_count).unwrap();
+        output
+    }
+
     #[test]
     fn state_export_import() {
         let mut export = vec![];
@@ -1675,6 +2147,75 @@ mod tests {
 
         let i = State::import(&mut export.as_slice(), None).unwrap();
         assert!(i.is_empty());
+
+        imports_pre_dependency_v5_fixture();
+        rejects_unresolved_user_data_dependency();
+        rejects_cyclic_user_data_dependencies();
+    }
+
+    fn imports_pre_dependency_v5_fixture() {
+        assert_eq!(EXPORT_FORMAT_VERSION, 5);
+
+        let old_id = 1_000_100;
+        let name = "state_fixture::legacy_v5_symbol";
+        let mut fixture = v5_partial_state_header(1);
+        write_v5_symbol(&mut fixture, old_id, name, &UserData::None);
+        fixture.write_u64::<LittleEndian>(0).unwrap(); // finite fields
+        fixture.write_u64::<LittleEndian>(0).unwrap(); // variable lists
+        fixture.write_u64::<LittleEndian>(1).unwrap(); // expressions
+        Atom::var(Symbol::raw_var(old_id, 0))
+            .as_view()
+            .write(&mut fixture)
+            .unwrap();
+
+        let imported = Atom::import(&mut fixture.as_slice(), None).unwrap();
+        assert_eq!(imported.get_symbol().unwrap().get_name(), name);
+    }
+
+    fn rejects_unresolved_user_data_dependency() {
+        let old_id = 1_000_200;
+        let missing_id = old_id + 1;
+        let mut fixture = v5_partial_state_header(1);
+        write_v5_symbol(
+            &mut fixture,
+            old_id,
+            "state_fixture::unresolved_owner",
+            &UserData::Atom(Atom::var(Symbol::raw_var(missing_id, 0))),
+        );
+        fixture.write_u64::<LittleEndian>(0).unwrap();
+        fixture.write_u64::<LittleEndian>(0).unwrap();
+
+        let error = match State::import(&mut fixture.as_slice(), None) {
+            Ok(_) => panic!("unresolved dependency was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("non-exported symbol id"));
+    }
+
+    fn rejects_cyclic_user_data_dependencies() {
+        let first_id = 1_000_300;
+        let second_id = first_id + 1;
+        let mut fixture = v5_partial_state_header(2);
+        write_v5_symbol(
+            &mut fixture,
+            first_id,
+            "state_fixture::cycle_a",
+            &UserData::Atom(Atom::var(Symbol::raw_var(second_id, 0))),
+        );
+        write_v5_symbol(
+            &mut fixture,
+            second_id,
+            "state_fixture::cycle_b",
+            &UserData::Atom(Atom::var(Symbol::raw_var(first_id, 0))),
+        );
+        fixture.write_u64::<LittleEndian>(0).unwrap();
+        fixture.write_u64::<LittleEndian>(0).unwrap();
+
+        let error = match State::import(&mut fixture.as_slice(), None) {
+            Ok(_) => panic!("cyclic dependencies were accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("Cyclic state dependencies"));
     }
 
     #[test]

@@ -736,11 +736,15 @@ impl AtomView<'_> {
             AtomView::Var(v) => {
                 if settings.include_attributes {
                     v.get_symbol()
-                        .format(&PrintOptions::full(), PrintState::default(), out)
+                        .format_without_custom_print(
+                            &PrintOptions::full(),
+                            PrintState::default(),
+                            out,
+                        )
                         .unwrap();
                 } else if settings.include_namespace {
                     v.get_symbol()
-                        .format(
+                        .format_without_custom_print(
                             &PrintOptions {
                                 hide_namespace: settings
                                     .hide_namespace
@@ -753,7 +757,7 @@ impl AtomView<'_> {
                         .unwrap();
                 } else {
                     v.get_symbol()
-                        .format(
+                        .format_without_custom_print(
                             &PrintOptions::file_no_namespace(),
                             PrintState::default(),
                             out,
@@ -764,11 +768,15 @@ impl AtomView<'_> {
             AtomView::Fun(f) => {
                 if settings.include_attributes {
                     f.get_symbol()
-                        .format(&PrintOptions::full(), PrintState::default(), out)
+                        .format_without_custom_print(
+                            &PrintOptions::full(),
+                            PrintState::default(),
+                            out,
+                        )
                         .unwrap();
                 } else if settings.include_namespace {
                     f.get_symbol()
-                        .format(
+                        .format_without_custom_print(
                             &PrintOptions {
                                 hide_namespace: settings
                                     .hide_namespace
@@ -781,7 +789,7 @@ impl AtomView<'_> {
                         .unwrap();
                 } else {
                     f.get_symbol()
-                        .format(
+                        .format_without_custom_print(
                             &PrintOptions::file_no_namespace(),
                             PrintState::default(),
                             out,
@@ -2400,11 +2408,11 @@ impl FormattedPrintAdd for AddView<'_> {
 #[cfg(test)]
 mod test {
     use crate::{
-        atom::{AtomCore, AtomView},
+        atom::{AtomCore, AtomView, SymbolAttribute, SymbolBuilder},
         domains::{SelfRing, finite_field::Zp, integer::Z},
         function, parse, parse_lit,
         printer::{AnsiHtmlFormatter, AnsiWrap, AtomPrinter, ColorMode, PrintOptions, PrintState},
-        symbol,
+        symbol, wrap_symbol,
     };
 
     #[test]
@@ -2644,6 +2652,24 @@ mod test {
         assert_eq!(
             a.to_canonical_string(),
             "(symbolica::{}::canon_x+symbolica::{}::canon_y)*symbolica::{}::canon_y^2+2*symbolica::{}::canon_x*symbolica::{}::canon_y+symbolica::{symmetric}::canon_f(symbolica::{}::canon_x,symbolica::{}::canon_y)+symbolica::{}::canon_x^2"
+        );
+    }
+
+    #[test]
+    fn canonical_string_ignores_custom_print() {
+        let head = SymbolBuilder::new(wrap_symbol!("canonical_print::head"))
+            .with_attributes(&[SymbolAttribute::Symmetric])
+            .with_tags(["kirapy::alias"])
+            .with_print_function(|_, _, _| Some("CUSTOM".into()))
+            .build()
+            .unwrap();
+        let argument = symbol!("canonical_print::argument");
+        let expression = function!(head, argument);
+
+        assert_eq!(expression.to_string(), "CUSTOM");
+        assert_eq!(
+            expression.to_canonical_string(),
+            "canonical_print::{symmetric,kirapy::alias}::head(canonical_print::{}::argument)"
         );
     }
 

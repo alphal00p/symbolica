@@ -1489,8 +1489,8 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Print the atom in a form that is independent of any implementation details, such
-    /// as the definition order of the symbols. Use [AtomCore::to_canonical_string] for a fully
-    /// canonical representation.
+    /// as the definition order of the symbols. Custom print functions are ignored. Use
+    /// [AtomCore::to_canonical_string] for a fully canonical representation.
     ///
     /// # Example
     ///
@@ -1510,7 +1510,8 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Print the atom in a form that is unique and independent of any implementation details.
-    /// The resulting string can be parsed back to the same expression.
+    /// Custom print functions are ignored, while symbol namespaces, attributes, and tags are
+    /// retained. The resulting string can be parsed back to the same expression.
     ///
     /// # Example
     ///

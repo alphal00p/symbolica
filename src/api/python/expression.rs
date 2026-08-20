@@ -4315,7 +4315,8 @@ impl PythonExpression {
 
     /// Convert the expression into a canonical string that
     /// is independent on the order of the variables and other
-    /// implementation details.
+    /// implementation details. Custom print callbacks are deliberately ignored;
+    /// the registered symbol name, namespace, attributes, and tags are used.
     pub fn to_canonical_string(&self) -> PyResult<String> {
         Ok(self.expr.to_canonical_string())
     }
@@ -4746,7 +4747,8 @@ impl PythonExpression {
     /// >>> y, x = S('y', 'x')
     /// >>> e = Expression.load('export.dat')
     ///
-    /// we get `f(y)+f(x)`.
+    /// we still get `f(x)+f(y)`: serialized symbol identities are remapped to
+    /// the symbols in the current process, independently of registration order.
     ///
     /// If we define a symbol with conflicting attributes, we can resolve the conflict
     /// using a renaming function:
