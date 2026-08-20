@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::mem;
-use std::ops::{Add, Div, Mul, Neg, Sub};
+use std::ops::{Add, Deref, DerefMut, Div, Mul, Neg, Sub};
 use std::sync::Arc;
 
 use crate::domains::algebraic::AlgebraicExtension;
@@ -331,11 +331,30 @@ impl<E: Display> Display for PositiveRealRootCountError<E> {
 
 impl<E: std::fmt::Debug + Display> std::error::Error for PositiveRealRootCountError<E> {}
 
-/// Shared coefficient ring and variable map of a multivariate polynomial.
+/// Shared context of a multivariate polynomial.
+///
+/// This type remains public so code written against the former public
+/// `MultivariatePolynomial::variables` field can access it through `Deref`.
+/// New code should prefer [`MultivariatePolynomial::variables`].
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-struct PolynomialContext<F: Ring> {
+#[doc(hidden)]
+pub struct PolynomialContext<F: Ring> {
     ring: F,
-    variables: Arc<Vec<PolyVariable>>,
+    pub variables: Arc<Vec<PolyVariable>>,
+}
+
+impl<F: Ring, E: Exponent, O: MonomialOrder> Deref for MultivariatePolynomial<F, E, O> {
+    type Target = PolynomialContext<F>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
+
+impl<F: Ring, E: Exponent, O: MonomialOrder> DerefMut for MultivariatePolynomial<F, E, O> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.context)
+    }
 }
 
 #[cfg(feature = "bincode")]

@@ -970,7 +970,7 @@ impl AtomView<'_> {
 
         let auxiliaries = Self::collect_auxiliary_powers(system);
         if auxiliaries.is_empty() {
-            match Self::solve_linear_system::<E, _, _>(system, vars) {
+            match Self::solve_linear_system_internal::<E, _, _>(system, vars) {
                 Ok(values) => {
                     return Ok(vec![SolveBranch::unconditional(
                         variables.into_iter().zip(values).collect(),
@@ -1352,7 +1352,7 @@ impl AtomView<'_> {
 
     /// Solve a system that is linear in `vars`, if possible.
     /// Each expression in `system` is understood to yield 0.
-    fn solve_linear_system<E: PositiveExponent, T1: AtomCore, T2: AtomCore>(
+    pub(crate) fn solve_linear_system_internal<E: PositiveExponent, T1: AtomCore, T2: AtomCore>(
         system: &[T1],
         vars: &[T2],
     ) -> Result<Vec<Atom>, SolveError> {
@@ -1713,7 +1713,7 @@ mod test {
         let variables = [Atom::var(x), Atom::var(y)];
 
         assert_eq!(
-            AtomView::solve_linear_system::<u16, _, Atom>(&system, &variables),
+            AtomView::solve_linear_system_internal::<u16, _, Atom>(&system, &variables),
             Err(SolveError::NonLinearSystem)
         );
 
@@ -2196,7 +2196,7 @@ mod test {
         let system: Vec<_> = eqs.iter().map(|e| parse!(e)).collect();
         let vars = [v0, v1, v2, v3, v4];
 
-        let sol = AtomView::solve_linear_system::<u8, _, InlineVar>(&system, &vars);
+        let sol = AtomView::solve_linear_system_internal::<u8, _, InlineVar>(&system, &vars);
 
         assert_eq!(
             sol,
@@ -2226,7 +2226,8 @@ mod test {
 
         let system: Vec<_> = eqs.iter().map(|e| parse!(e)).collect();
 
-        let sol = AtomView::solve_linear_system::<u8, _, InlineVar>(&system, &[x, y, z]).unwrap();
+        let sol = AtomView::solve_linear_system_internal::<u8, _, InlineVar>(&system, &[x, y, z])
+            .unwrap();
 
         let res = [
             "(v4^3-2*v4^2*f1(v4))*(v4^2-f1(v4)-v4^3+v4^4+v4*f1(v4)-v4^2*f1(v4))^-1",
