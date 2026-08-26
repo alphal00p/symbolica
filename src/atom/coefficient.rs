@@ -93,6 +93,10 @@ const fn get_size_of_natural(num_type: u8) -> u8 {
 }
 
 impl SerializedRationalPolynomial<'_> {
+    pub(crate) fn variable_list_index(self) -> u64 {
+        self.0.get_frac_u64().0
+    }
+
     pub fn deserialize(self) -> RationalPolynomial<IntegerRing, u16> {
         let mut source = self.0;
 

@@ -585,6 +585,7 @@ impl Atom {
         if n_terms == 1 {
             let mut a = Atom::new();
             a.read(source)?;
+            state_map.validate_imported_atom(a.as_view())?;
             Ok(a.as_view().rename(&state_map))
         } else {
             let mut res = Atom::new();
@@ -596,6 +597,7 @@ impl Atom {
             Workspace::get_local().with(|ws| {
                 for _ in 0..n_terms {
                     tmp.read(&mut *source)?;
+                    state_map.validate_imported_atom(tmp.as_view())?;
 
                     let mut settable = Settable::from(&mut tmp2);
 
