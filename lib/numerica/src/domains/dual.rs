@@ -893,6 +893,9 @@ macro_rules! create_hyperdual_from_components {
 
             #[inline]
             fn pow(&self, e: u64) -> Self {
+                if e == 0 {
+                    return self.one();
+                }
                 // TODO: use binary exponentiation
                 let mut res = self.clone();
                 for _ in 1..e {
@@ -2000,6 +2003,9 @@ impl<T: FloatLike> FloatLike for HyperDual<T> {
 
     #[inline]
     fn pow(&self, e: u64) -> Self {
+        if e == 0 {
+            return self.one();
+        }
         // TODO: use binary exponentiation
         let mut res = self.clone();
         for _ in 1..e {
@@ -2426,6 +2432,70 @@ mod test {
     create_hyperdual_from_depths!(Dual, [1, 2, 3]);
     create_hyperdual_from_components!(ReorderedDual, [[0, 0], [0, 1], [1, 0]]);
     create_hyperdual_from_components!(NormDual, [[0, 0], [1, 0], [0, 1], [2, 0], [1, 1]]);
+
+    #[test]
+    fn integer_powers_preserve_components_precision_and_shape() {
+        use super::DualNumber;
+        use crate::domains::float::{Complex, Float, SingleFloat};
+
+        fn check<T: Real + SingleFloat, D: Real + DualNumber<Complex<T>>>(
+            prototype: &T,
+            mut value: D,
+        ) where
+            Complex<T>: Real,
+        {
+            // i*(2+x+3y+5x²+7xy), stored as Taylor coefficients.
+            for (power, imaginary, expected) in [
+                (0, false, [1, 0, 0, 0, 0]),
+                (1, true, [2, 1, 3, 5, 7]),
+                (2, false, [-4, -4, -12, -21, -34]),
+                (3, true, [-8, -12, -36, -66, -120]),
+            ] {
+                let result = value.pow(power);
+                assert_eq!(result.get_shape(), value.get_shape());
+                for (actual, expected) in result.values().iter().zip(expected) {
+                    let number = prototype.from_i64(expected);
+                    let expected = if imaginary {
+                        Complex::new(prototype.zero(), number)
+                    } else {
+                        Complex::new(number, prototype.zero())
+                    };
+                    assert_eq!(actual, &expected);
+                    assert_eq!(actual.re.get_precision(), prototype.get_precision());
+                    assert_eq!(actual.im.get_precision(), prototype.get_precision());
+                }
+            }
+            // A vanishing primal with nonzero derivatives still has power zero
+            // equal to the multiplicative identity in the original shape.
+            value.values_mut()[0] = Complex::new(prototype.zero(), prototype.zero());
+            let result = value.pow(0);
+            assert_eq!(result.get_shape(), value.get_shape());
+            assert_eq!(result.values(), value.one().values());
+        }
+
+        fn carriers<T: Real + SingleFloat>(prototype: T)
+        where
+            Complex<T>: Real,
+        {
+            let values =
+                [2, 1, 3, 5, 7].map(|v| Complex::new(prototype.zero(), prototype.from_i64(v)));
+            check(
+                &prototype,
+                NormDual {
+                    values: values.clone(),
+                },
+            );
+            check(
+                &prototype,
+                HyperDual::from_values(
+                    vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![2, 0], vec![1, 1]],
+                    values.to_vec(),
+                ),
+            );
+        }
+        carriers(0.);
+        carriers(Float::new(192));
+    }
 
     #[test]
     fn complex_norm_real_parameter_derivatives() {
