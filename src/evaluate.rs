@@ -587,6 +587,166 @@ mod test {
     }
 
     #[test]
+    fn completed_conditionals_reuse_only_their_parent_scope() {
+        let repeated = parse!("(if(c,1/x,sqrt(x+2))+x)*(if(c,1/x,sqrt(x+2))+y)");
+        let params = [parse!("c"), parse!("x"), parse!("y")];
+        let exact = repeated
+            .evaluator(&params)
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        let branches = |graph: &ExportedInstructions<Complex<Rational>>| {
+            graph
+                .instructions
+                .iter()
+                .filter(|i| matches!(i, Instruction::IfElse(..)))
+                .count()
+        };
+        assert_eq!(branches(&exact.export_instructions()), 1);
+        let heads = [
+            parse!("if(c,1/x,sqrt(x+2))+x"),
+            parse!("if(c,1/x,sqrt(x+2))+y"),
+        ];
+        let multiple = Atom::evaluator_multiple(&heads, &params)
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        assert_eq!(branches(&multiple.export_instructions()), 1);
+        let separate =
+            parse!("if(a,(if(c,1/x,sqrt(x+2))+x)*(if(c,1/x,sqrt(x+2))+y),if(c,1/x,sqrt(x+2))+y)");
+        let exact = separate
+            .evaluator(&[parse!("a"), parse!("c"), parse!("x"), parse!("y")])
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        // One completed inner conditional in each arm; neither arm's result
+        // may escape into its sibling, even when the expressions are identical.
+        assert_eq!(branches(&exact.export_instructions()), 3);
+        let mut scalar = exact.clone().map_coeff(&|c| c.re.to_f64());
+        let mut batch = scalar.clone().into_batch_evaluator();
+        let inputs = [
+            1., 0., 0., 2., 0., 0., 0., 2., 1., 1., -2., 3., 0., 1., -2., 3.,
+        ];
+        let mut expected = [0.; 4];
+        for (input, expected) in inputs.as_chunks::<4>().0.iter().zip(&mut expected) {
+            let [a, c, x, y] = *input;
+            let selected = if c != 0. { 1. / x } else { (x + 2.).sqrt() };
+            *expected = if a != 0. {
+                (selected + x) * (selected + y)
+            } else {
+                selected + y
+            };
+            assert!((scalar.evaluate_single(input) - *expected).abs() < 1e-12);
+        }
+        for rows in [4, 0, 1, 3, 4] {
+            let mut output = vec![f64::NAN; rows];
+            batch
+                .evaluate_batch(&inputs[..4 * rows], &mut output, rows)
+                .unwrap();
+            for (actual, expected) in output.iter().zip(expected) {
+                assert!(actual.is_finite() && (actual - expected).abs() < 1e-12);
+            }
+        }
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&exact, bincode::config::standard()).unwrap();
+            let (decoded, _) = bincode::decode_from_slice::<
+                crate::evaluate::ExpressionEvaluator<Complex<Rational>>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            let mut decoded = decoded.map_coeff(&|c| c.re.to_f64());
+            assert!((decoded.evaluate_single(&inputs[..4]) - expected[0]).abs() < 1e-12);
+        }
+        #[cfg(feature = "native_code_generation")]
+        {
+            let mut jit = scalar
+                .jit_compile(JITCompilationSettings::default())
+                .unwrap();
+            for (input, expected) in inputs.as_chunks::<4>().0.iter().zip(expected) {
+                let mut output = [0.];
+                jit.evaluate(input, &mut output);
+                assert!((output[0] - expected).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn completed_shared_conditionals_keep_captures_and_mixed_dual_components() {
+        let params = [parse!("c"), parse!("x"), parse!("y")];
+        let build = |policy| {
+            parse!("conditional_cache::f(c,x)+conditional_cache::f(c,x+1)")
+                .evaluator(&params)
+                .add_function_with_options(
+                    symbol!("conditional_cache::f"),
+                    vec![symbol!("b"), symbol!("z")],
+                    parse!("(if(b,1/z,z+y)+z)*(if(b,1/z,z+y)+y)"),
+                    FunctionRegistrationOptions::new().inlining(policy),
+                )
+                .unwrap()
+                .horner_iterations(0)
+                .build()
+                .unwrap()
+        };
+        let exact = build(InliningPolicy::Never);
+        let exported = exact.export_instructions();
+        assert_eq!(exported.sub_evaluators.len(), 1);
+        let helper = &exported.sub_evaluators[0];
+        assert_eq!(helper.input_count, 3); // b, z, captured y
+        assert_eq!(
+            helper
+                .instructions
+                .instructions
+                .iter()
+                .filter(|i| matches!(i, Instruction::IfElse(..)))
+                .count(),
+            1
+        );
+        let dual = Dualizer::new(
+            HyperDual::<Complex<Rational>>::new(vec![
+                vec![0, 0],
+                vec![1, 0],
+                vec![0, 1],
+                vec![2, 0],
+                vec![1, 1],
+            ]),
+            vec![],
+        );
+        let mut shared = exact
+            .vectorize(&dual)
+            .unwrap()
+            .map_coeff(&|c| c.re.to_f64());
+        let mut inline = build(InliningPolicy::Always)
+            .vectorize(&dual)
+            .unwrap()
+            .map_coeff(&|c| c.re.to_f64());
+        let mut batch = shared.clone().into_batch_evaluator();
+        let mut inputs = Vec::new();
+        let mut expected = Vec::new();
+        for (c, x, y) in [(0., 0., 2.), (1., 2., 3.), (0., -1., 4.), (1., -3., -2.)] {
+            let row = [c, 0., 0., 0., 0., x, 1., 0., 0., 0., y, 0., 1., 0., 0.];
+            let mut output = [0.; 5];
+            let mut reference = [0.; 5];
+            shared.evaluate(&row, &mut output);
+            inline.evaluate(&row, &mut reference);
+            for (actual, reference) in output.iter().zip(reference) {
+                assert!(actual.is_finite() && (actual - reference).abs() < 1e-11);
+            }
+            inputs.extend(row);
+            expected.extend(reference);
+        }
+        for rows in [4, 0, 1, 3, 4] {
+            let mut output = vec![f64::NAN; rows * 5];
+            batch
+                .evaluate_batch(&inputs[..rows * 15], &mut output, rows)
+                .unwrap();
+            for (actual, reference) in output.iter().zip(&expected) {
+                assert!(actual.is_finite() && (actual - reference).abs() < 1e-11);
+            }
+        }
+    }
+
+    #[test]
     fn non_inlined_function_reuses_temporary_stack_slots() {
         let helper = symbol!("symbolica::shared_stack::chain");
         let argument = symbol!("symbolica::shared_stack::argument");
