@@ -1150,23 +1150,43 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     // Differentiation parameters are real, but their coefficients can
                     // be complex. Reuse the dual product and square root for
                     // |z| = sqrt(z * conj(z)), including higher/mixed components.
-                    let conjugate = (0..self.dual.get_len())
-                        .map(|j| {
-                            instrs.add(VectorInstruction::BuiltinFun(Symbol::CONJ, a.index(j)))
-                        })
-                        .collect::<Vec<_>>();
+                    // Normalize first, preserving the stable scalar norm instead
+                    // of squaring a potentially very large or small primal value.
+                    let norm = instrs.add(VectorInstruction::BuiltinFun(Symbol::ABS, *a));
+                    let inverse = instrs.add(VectorInstruction::Pow(norm, -1));
                     let input = (0..self.dual.get_len())
-                        .map(|j| a.index(j))
+                        .map(|j| scalar_mul(&a.index(j), &inverse, self, instrs))
                         .collect::<Vec<_>>();
-                    let norm_squared = mul(&input, &conjugate, mult_table, self, instrs);
+                    let conjugate = input
+                        .iter()
+                        .map(|slot| instrs.add(VectorInstruction::BuiltinFun(Symbol::CONJ, *slot)))
+                        .collect::<Vec<_>>();
+                    let mut norm_squared = mul(&input, &conjugate, mult_table, self, instrs);
+                    norm_squared[0] =
+                        instrs.add_constant_in_first_component(Complex::from(Rational::one()));
                     let adjacent = norm_squared
                         .into_iter()
                         .map(|slot| instrs.add(VectorInstruction::Assign(slot)))
                         .collect::<Vec<_>>();
-                    self.map_instruction(
-                        &VectorInstruction::BuiltinFun(Symbol::SQRT, adjacent[0]),
-                        instrs,
-                    )
+                    let result = self
+                        .map_instruction(
+                            &VectorInstruction::BuiltinFun(Symbol::SQRT, adjacent[0]),
+                            instrs,
+                        )
+                        .into_iter()
+                        .map(|instruction| instrs.add(instruction))
+                        .collect::<Vec<_>>();
+                    result
+                        .iter()
+                        .enumerate()
+                        .map(|(j, slot)| {
+                            if j == 0 {
+                                VectorInstruction::Assign(norm)
+                            } else {
+                                scalar_yield_mul(slot, &norm, self, instrs)
+                            }
+                        })
+                        .collect()
                 }
                 Symbol::CONJ_ID => {
                     // assume variables are real
@@ -1665,6 +1685,18 @@ mod test {
                 actual.im.abs() < 1e-12,
                 "non-real modulus component: {actual:?}"
             );
+        }
+    }
+
+    #[test]
+    fn absolute_value_preserves_extreme_primal_scales() {
+        let mut evaluator =
+            dualize("abs(x)", &[parse!("x")], vec![vec![0], vec![1]]).map_coeff(&|c| c.re.to_f64());
+        for x in [1e200, -1e200, 1e-200, -1e-200] {
+            let mut out = [0.; 2];
+            evaluator.evaluate(&[x, 1.], &mut out);
+            assert_eq!(out[0], x.abs());
+            assert!((out[1] - x.signum()).abs() < 1e-12, "{x}: {out:?}");
         }
     }
 
