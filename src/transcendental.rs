@@ -557,6 +557,32 @@ impl SpecialSymbols {
                         **out = function!(polylog_symbol, s.to_owned() - 1, z) / z;
                     }
                 })
+                .with_series_function(|args| {
+                    let [n, z] = args else { return None; };
+                    let order = u32::try_from(n.to_atom()).ok()?;
+                    if order < 2 || z.get_trailing_exponent() <= 0 {
+                        return None;
+                    }
+
+                    // At zero, substitution into the derivative Li_{n-1}(z)/z
+                    // loses the removable limit. Compose the defining series
+                    // instead, as in polylog_series_integer. Positive valuation
+                    // ensures that only finitely many powers survive truncation.
+                    let depth = z.absolute_order();
+                    let mut sum = z.clone();
+                    let mut power = z.clone();
+                    let mut k = Integer::from(2);
+                    loop {
+                        power = &power * z;
+                        power.truncate_absolute_order(depth.clone());
+                        if power.is_zero() {
+                            break;
+                        }
+                        sum = &sum + &power.clone().div_coeff(&Atom::num(k.clone()).pow(order));
+                        k += 1;
+                    }
+                    Some((Atom::num(1), sum.to_atom()))
+                })
                 .with_evaluation_info(
                     EvaluationInfo::new().with_tags(1)
                     .register_tagged(|tags| {
@@ -3202,37 +3228,33 @@ fn polygamma_order_zero_exact_rational(rat: &Rational) -> Option<Atom> {
     None
 }
 
-// Automatic exact normalization must bound both the finite shift sum and
-// the factorial/even-zeta Bernoulli expansion it can trigger.
-const MAX_EXACT_POLYGAMMA_ORDER: u32 = 64;
-const MAX_EXACT_POLYGAMMA_INTEGER_ARGUMENT: i64 = 64;
-
 fn polygamma_exact_rational(order: u32, rat: &Rational) -> Option<Atom> {
     if order == 0 {
         return polygamma_order_zero_exact_rational(rat);
     }
 
-    if order > MAX_EXACT_POLYGAMMA_ORDER || rat.denominator() != 1 {
+    if rat.denominator() != 1 {
         return None;
     }
 
     let argument = rat.numerator().to_i64()?;
-    if !(1..=MAX_EXACT_POLYGAMMA_INTEGER_ARGUMENT).contains(&argument) {
+    if argument < 1 {
         return None;
     }
+    let zeta_order = order.checked_add(1)?;
 
     // DLMF 5.15.2 and 5.15.5: psi^(n)(m) = (-1)^(n+1) n!
     // * (zeta(n+1) - sum_{k=1}^{m-1} k^(-n-1)), for n,m >= 1.
     let mut shift = Rational::zero();
     for k in 1..argument {
-        shift += &(Rational::one() / Rational::from(k).pow(u64::from(order) + 1));
+        shift += &(Rational::one() / Rational::from(k).pow(u64::from(zeta_order)));
     }
     let mut factor = Integer::factorial(order);
     if order.is_multiple_of(2) {
         factor = -factor;
     }
     Some(
-        Atom::num(factor.clone()) * function!(SPECIALS.zeta, Atom::num(order + 1))
+        Atom::num(factor.clone()) * function!(SPECIALS.zeta, Atom::num(zeta_order))
             - Atom::num(Rational::from(factor) * shift),
     )
 }
@@ -5278,11 +5300,13 @@ mod tests {
             ("polygamma(1,2)", "pi^2/6-1"),
             ("polygamma(2,2)", "2-2*zeta(3)"),
             ("polygamma(3,3)", "pi^4/15-51/8"),
+            ("polygamma(65,1)", "gamma(66)*zeta(66)"),
+            ("polygamma(66,1)", "-gamma(67)*zeta(67)"),
         ] {
             assert_eq!(parse!(input), parse!(expected));
         }
         for order in 1..=8 {
-            for argument in 1..=5 {
+            for argument in [1, 2, 3, 4, 5, 65, 100] {
                 let difference = parse!(format!(
                     "polygamma({order},{})-polygamma({order},{argument})",
                     argument + 1
@@ -5298,12 +5322,17 @@ mod tests {
     }
 
     #[test]
-    fn polygamma_exact_normalization_respects_work_and_domain_limits() {
+    fn polygamma_exact_normalization_respects_domain_and_integer_ranges() {
         let native = super::polygamma();
-        assert!(!parse!("polygamma(64,64)").contains_symbol(native));
         for input in [
+            "polygamma(64,64)",
             "polygamma(65,1)",
             "polygamma(1,65)",
+            "polygamma(2,100)",
+        ] {
+            assert!(!parse!(input).contains_symbol(native), "{input}");
+        }
+        for input in [
             "polygamma(4294967295,1)",
             "polygamma(1,1000000000000000000000000000000)",
             "polygamma(-1,1)",
@@ -5460,6 +5489,67 @@ mod tests {
     #[test]
     fn polylog_float_normalization() {
         assert!(Complex::<Float>::try_from(parse!("polylog(2,0.5)")).is_ok());
+    }
+
+    #[test]
+    fn polylog_series_at_zero() {
+        let x = symbol!("x");
+        assert_eq!(
+            parse!("polylog(2,x)").series(x, 0, 8).unwrap().to_atom(),
+            parse!("x+x^2/4+x^3/9+x^4/16+x^5/25+x^6/36+x^7/49+x^8/64")
+        );
+        assert_eq!(
+            parse!("polylog(3,x)").series(x, 0, 5).unwrap().to_atom(),
+            parse!("x+x^2/8+x^3/27+x^4/64+x^5/125")
+        );
+        assert_eq!(
+            parse!("polylog(2,x^5)").series(x, 0, 2).unwrap().to_atom(),
+            Atom::new()
+        );
+        assert_eq!(
+            parse!("polylog(2,x)/x").series(x, 0, 4).unwrap().to_atom(),
+            parse!("1+x/4+x^2/9+x^3/16+x^4/25")
+        );
+    }
+
+    #[test]
+    fn polylog_series_at_zero_composes_and_shifts() {
+        let x = symbol!("x");
+        assert_eq!(
+            parse!("polylog(2,1-x)")
+                .series(x, 1, 5)
+                .unwrap()
+                .to_atom()
+                .expand(),
+            parse!("-(x-1)+(x-1)^2/4-(x-1)^3/9+(x-1)^4/16-(x-1)^5/25").expand()
+        );
+        assert_eq!(
+            parse!("polylog(2,x+x^2)")
+                .series(x, 0, 4)
+                .unwrap()
+                .to_atom(),
+            parse!("x+5*x^2/4+11*x^3/18+31*x^4/48")
+        );
+        assert_eq!(
+            parse!("polylog(2,x^(1/2))")
+                .series(x, 0, (5, 2))
+                .unwrap()
+                .to_atom(),
+            parse!("x^(1/2)+x/4+x^(3/2)/9+x^2/16+x^(5/2)/25")
+        );
+    }
+
+    #[test]
+    fn polylog_series_away_from_zero_is_unchanged() {
+        let x = symbol!("x");
+        assert_eq!(
+            parse!("polylog(2,-1+x)")
+                .series(x, 0, 2)
+                .unwrap()
+                .to_atom()
+                .expand(),
+            parse!("-pi^2/12+log(2)*x+(log(2)/2-1/4)*x^2").expand()
+        );
     }
 
     #[test]

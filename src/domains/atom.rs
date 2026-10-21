@@ -40,7 +40,11 @@ impl<T: Clone + Send + Sync + Fn(AtomView<'_>, &mut Atom) -> bool> Map for T {}
 /// ```
 #[derive(Clone)]
 pub struct AtomField {
-    /// Use a statistical test to check for zero, instead of only checking for an exact zero.
+    /// Treat expressions that may be identically zero as zero.
+    ///
+    /// When enabled, both `True` and `Inconclusive` from [`AtomCore::check_zero`]
+    /// count as zero. When disabled, only literal numerical zeros count as zero.
+    /// Use `check_zero().is_true()` directly when a proof of zero is required.
     pub statistical_zero_test: bool,
     /// Perform a cancellation check of numerators and denominators after a division.
     pub cancel_check_on_division: bool,
@@ -226,7 +230,7 @@ impl Ring for AtomField {
     /// Check if the result could be 0 using a statistical method.
     fn is_zero(&self, a: &Self::Element) -> bool {
         if self.statistical_zero_test {
-            !a.as_view().zero_test(10, f64::EPSILON).is_false()
+            !a.check_zero().is_false()
         } else {
             a.is_zero()
         }
@@ -245,7 +249,7 @@ impl Ring for AtomField {
     }
 
     fn try_inv(&self, a: &Self::Element) -> Option<Self::Element> {
-        if SelfRing::is_zero(a) {
+        if <Self as Ring>::is_zero(self, a) {
             None
         } else {
             Some(self.inv(a))
@@ -253,7 +257,7 @@ impl Ring for AtomField {
     }
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
-        if SelfRing::is_zero(b) {
+        if <Self as Ring>::is_zero(self, b) {
             None
         } else {
             Some(self.div(a, b))
@@ -292,8 +296,10 @@ impl SampleableRing for AtomField {
 }
 
 impl SelfRing for Atom {
+    /// Return whether the expression could be identically zero.
+    /// Both proven zero and inconclusive results count as zero.
     fn is_zero(&self) -> bool {
-        !self.as_view().zero_test(10, f64::EPSILON).is_false()
+        !self.check_zero().is_false()
     }
 
     fn is_one(&self) -> bool {

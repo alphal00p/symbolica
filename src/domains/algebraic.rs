@@ -39,7 +39,7 @@ use crate::{
 
 use super::{
     EuclideanDomain, Field, InternalOrdering, OrderedRing, RealEmbedding, Ring, SampleableRing,
-    SelfRing,
+    SelfRing, UniformlySampleableRing,
     finite_field::{FiniteField, FiniteFieldCore, FiniteFieldWorkspace, ToFiniteField},
     integer::{Integer, IntegerRing, Z},
     rational::Rational,
@@ -47,15 +47,65 @@ use super::{
 
 mod kernels;
 
+/// Sampling policy for an algebraic extension or quotient.
+///
+/// Each coefficient up to the chosen degree is sampled independently. Higher
+/// coefficients are zero. The bound is clipped to the degree of the defining
+/// polynomial minus one; it does not force the leading coefficient to be nonzero.
+///
+/// ```
+/// use symbolica::prelude::*;
+///
+/// let field = AlgebraicExtension::new(parse!("a^2+a+1").to_polynomial::<_, u16>(&Z2, None));
+/// let constants = AlgebraicSamplingPolicy {
+///     max_degree: Some(0),
+///     coefficient: FiniteFieldSamplingPolicy::Full,
+/// };
+/// let mut rng = rand::rng();
+/// assert!(field.sample(&mut rng, &constants).poly().is_constant());
+/// // With no degree bound, every field element is available.
+/// let full = AlgebraicSamplingPolicy::default();
+/// let value = field.sample_nonzero(&mut rng, &full);
+/// assert!(!field.is_zero(&value));
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AlgebraicSamplingPolicy<P> {
+    /// Maximum degree in the extension generator. `None` permits the entire basis.
+    /// Use `Some(0)` to sample only elements of the coefficient ring.
+    pub max_degree: Option<usize>,
+    /// Distribution used independently for each permitted basis coefficient.
+    pub coefficient: P,
+}
+
+impl<P> AlgebraicSamplingPolicy<P> {
+    /// Allow every basis coefficient, sampling each according to `coefficient`.
+    pub fn new(coefficient: P) -> Self {
+        Self {
+            max_degree: None,
+            coefficient,
+        }
+    }
+}
+
 /// A Galois field `GF(p,n)` is a finite field with `p^n` elements.
 /// It provides methods to upgrade and downgrade to Galois fields with the
 /// same prime but with a different power.
-pub trait GaloisField: Field {
+pub trait GaloisField: Field + UniformlySampleableRing {
     /// Prime finite field over which this extension is defined.
-    type Base: Field;
+    type Base: Field + UniformlySampleableRing;
 
     /// Return the degree over [`Self::Base`].
     fn extension_degree(&self) -> u64;
+
+    /// Choose the coefficient distribution and maximum degree of sampled elements.
+    ///
+    /// `Some(0)` samples only constants from the prime subfield. `None` allows
+    /// every basis coefficient. Prime fields ignore the degree bound.
+    fn sampling_policy(
+        &self,
+        max_degree: Option<usize>,
+        coefficient: <Self::Base as SampleableRing>::SamplingPolicy,
+    ) -> Self::SamplingPolicy;
 
     /// Upgrade the field to `GF(p,new_pow)`.
     fn upgrade(&self, new_pow: usize) -> AlgebraicExtension<Self::Base>
@@ -70,13 +120,26 @@ pub trait GaloisField: Field {
         larger_field: &AlgebraicExtension<Self::Base>,
     ) -> <AlgebraicExtension<Self::Base> as Set>::Element;
 
+    /// Try to project `e` back into this field.
+    ///
+    /// Returns `None` if its polynomial representation is not in the image of
+    /// [`Self::upgrade_element`].
+    fn try_downgrade_element(
+        &self,
+        e: &<AlgebraicExtension<Self::Base> as Set>::Element,
+    ) -> Option<Self::Element>;
+
     /// Project `e` back into this field.
     ///
-    /// The caller must ensure that `e` belongs to the image of this field.
+    /// # Panics
+    ///
+    /// Panics if [`Self::try_downgrade_element`] returns `None`.
     fn downgrade_element(
         &self,
         e: &<AlgebraicExtension<Self::Base> as Set>::Element,
-    ) -> Self::Element;
+    ) -> Self::Element {
+        self.try_downgrade_element(e).unwrap()
+    }
 }
 
 impl<UField: FiniteFieldWorkspace> GaloisField for FiniteField<UField>
@@ -87,6 +150,14 @@ where
 
     fn extension_degree(&self) -> u64 {
         1
+    }
+
+    fn sampling_policy(
+        &self,
+        _max_degree: Option<usize>,
+        coefficient: <Self::Base as SampleableRing>::SamplingPolicy,
+    ) -> Self::SamplingPolicy {
+        coefficient
     }
 
     fn upgrade(&self, new_pow: usize) -> AlgebraicExtension<FiniteField<UField>>
@@ -105,11 +176,11 @@ where
         larger_field.constant(e.clone())
     }
 
-    fn downgrade_element(
+    fn try_downgrade_element(
         &self,
         e: &<AlgebraicExtension<Self::Base> as Set>::Element,
-    ) -> Self::Element {
-        e.poly.get_constant()
+    ) -> Option<Self::Element> {
+        (e.poly.ring() == self && e.poly.is_constant()).then(|| e.poly.get_constant())
     }
 }
 
@@ -362,6 +433,17 @@ where
         self.poly.degree(0) as u64
     }
 
+    fn sampling_policy(
+        &self,
+        max_degree: Option<usize>,
+        coefficient: <Self::Base as SampleableRing>::SamplingPolicy,
+    ) -> Self::SamplingPolicy {
+        AlgebraicSamplingPolicy {
+            max_degree,
+            coefficient,
+        }
+    }
+
     fn upgrade(&self, new_pow: usize) -> AlgebraicExtension<Self::Base>
     where
         Self::Base: PolynomialGCD<u16>,
@@ -382,11 +464,18 @@ where
         larger_field.element_from_polynomial(e.poly.clone())
     }
 
-    fn downgrade_element(
+    fn try_downgrade_element(
         &self,
         e: &<AlgebraicExtension<Self::Base> as Set>::Element,
-    ) -> Self::Element {
-        self.element_from_polynomial(e.poly.clone())
+    ) -> Option<Self::Element> {
+        if e.poly.ring() != self.poly.ring() {
+            return None;
+        }
+        if e.poly.is_constant() {
+            return Some(self.constant(e.poly.get_constant()));
+        }
+        let projected = self.try_element_from_polynomial(e.poly.clone()).ok()?;
+        (projected.poly == e.poly).then_some(projected)
     }
 }
 
@@ -1074,6 +1163,11 @@ impl AlgebraicContext {
                 {
                     let base = self.rational_polynomial_from_images(base, var_map)?;
                     if exponent < 0 {
+                        if base.is_zero() {
+                            return Err(
+                                "Division by an identically zero algebraic expression".into()
+                            );
+                        }
                         Ok(base.inv().pow(exponent.unsigned_abs()))
                     } else {
                         Ok(base.pow(exponent as u64))
@@ -1095,7 +1189,12 @@ impl AlgebraicContext {
         generator: Option<&Atom>,
         element_atoms: &mut HashMap<AlgebraicNumber<Q>, Atom>,
     ) -> Result<Atom, String> {
-        let atom_field = AtomField::new();
+        // Algebraic generators are represented by opaque powers/functions here.
+        // Preserve them when the general identity checker cannot decide them.
+        let atom_field = AtomField {
+            statistical_zero_test: false,
+            ..AtomField::new()
+        };
         let field_generator = &self.field.poly.get_vars_ref()[0];
         let fallback_generator = if generator.is_none()
             && polynomial
@@ -1138,8 +1237,12 @@ impl AlgebraicContext {
                 let coefficient = if let Some(generator) = generator {
                     let mut coefficient = Atom::Zero;
                     for generator_term in term.coefficient.poly() {
-                        coefficient += generator.clone().pow(generator_term.exponents[0])
-                            * Atom::num(generator_term.coefficient.clone());
+                        let term = Atom::num(generator_term.coefficient.clone());
+                        coefficient += if generator_term.exponents[0] == 0 {
+                            term
+                        } else {
+                            generator.clone().pow(generator_term.exponents[0]) * term
+                        };
                     }
                     coefficient
                 } else {
@@ -1270,6 +1373,13 @@ impl AtomView<'_> {
                     && let Ok(numerator) = i64::try_from(r.numerator())
                     && let Ok(denominator) = u64::try_from(r.denominator())
                 {
+                    if ring.is_zero(&base_converted) {
+                        return if r.is_negative() || r.is_zero() {
+                            Err("Nonpositive power of zero".into())
+                        } else {
+                            Ok(ring.zero())
+                        };
+                    }
                     if r.is_integer() {
                         if r.is_negative() {
                             return Ok(
@@ -1279,6 +1389,18 @@ impl AtomView<'_> {
                         return Ok(ring.pow(&base_converted, numerator.unsigned_abs()));
                     }
 
+                    if !ring.is_positive_real(&base_converted)? {
+                        let root = ring.principal_radical(&base_converted, denominator)?;
+                        let mut value =
+                            ring.embedded_rational_root(root.polynomial(), root.index())?;
+                        if numerator < 0 {
+                            value = ring.inv(&value);
+                        }
+                        return Ok(ring.pow(&value, numerator.unsigned_abs()));
+                    }
+                    if denominator > u16::MAX as u64 {
+                        return Err("Algebraic root degree exceeds the exponent range".into());
+                    }
                     let var = ring.fresh_variable();
                     let mut poly = MultivariatePolynomial::<_, u16>::new(
                         ring,
@@ -1439,7 +1561,14 @@ impl AtomView<'_> {
                     if let Some(c) = cur {
                         // create min poly and adjoin if needed
                         let base_converted = b.to_algebraic(&c).ok()?;
+                        if c.is_zero(&base_converted) {
+                            return Some(c);
+                        }
                         if !c.is_positive_real(&base_converted).ok()? {
+                            let root = c.principal_radical(&base_converted, denominator).ok()?;
+                            return c.with_adjoined_rational_root(root.polynomial(), root.index());
+                        }
+                        if denominator > u16::MAX as u64 {
                             return None;
                         }
 
@@ -1506,7 +1635,18 @@ impl AtomView<'_> {
                             cur = Some(c.adjoin_with_embedding(&ext, None).0);
                         }
                     } else if let Ok(rat_base) = Rational::try_from(b) {
-                        if rat_base.is_negative() || rat_base.is_zero() {
+                        if rat_base.is_zero() {
+                            return None;
+                        }
+                        if rat_base.is_negative() {
+                            let field = AlgebraicExtension::trivial(Q);
+                            let root = field
+                                .principal_radical(&field.constant(rat_base), denominator)
+                                .ok()?;
+                            return field
+                                .with_adjoined_rational_root(root.polynomial(), root.index());
+                        }
+                        if denominator > u16::MAX as u64 {
                             return None;
                         }
 
@@ -2112,28 +2252,35 @@ impl<R: EuclideanDomain> Ring for AlgebraicExtension<R> {
     }
 }
 
+impl<R> UniformlySampleableRing for AlgebraicExtension<R>
+where
+    R: EuclideanDomain + UniformlySampleableRing,
+{
+    fn uniform_sampling_policy(&self) -> Self::SamplingPolicy {
+        AlgebraicSamplingPolicy::new(self.poly.ring().uniform_sampling_policy())
+    }
+}
+
 impl<R> SampleableRing for AlgebraicExtension<R>
 where
     R: EuclideanDomain + SampleableRing,
 {
-    type SamplingPolicy = R::SamplingPolicy;
+    type SamplingPolicy = AlgebraicSamplingPolicy<R::SamplingPolicy>;
 
     fn sample<G: rand::RngCore + ?Sized>(
         &self,
         rng: &mut G,
         policy: &Self::SamplingPolicy,
     ) -> Self::Element {
-        let coeffs: Vec<_> = (0..self.poly.degree(0))
-            .map(|_| self.poly.ring().sample(rng, policy))
-            .collect();
-
-        let mut poly = self.poly.zero_with_capacity(coeffs.len());
-        let mut exp = vec![0];
-        for (i, c) in coeffs.into_iter().enumerate() {
-            exp[0] = i as u16;
-            poly.append_monomial(c, &exp);
+        let basis_size = self.poly.degree(0) as usize;
+        let coefficients = policy.max_degree.map_or(basis_size, |degree| {
+            degree.saturating_add(1).min(basis_size)
+        });
+        let mut poly = self.poly.zero_with_capacity(coefficients);
+        for i in 0..coefficients {
+            let coefficient = self.poly.ring().sample(rng, &policy.coefficient);
+            poly.append_monomial(coefficient, &[i as u16]);
         }
-
         AlgebraicNumber { poly }
     }
 }
@@ -2399,11 +2546,20 @@ impl<R: EuclideanDomain> Ring for AlgebraicQuotient<R> {
     }
 }
 
+impl<R> UniformlySampleableRing for AlgebraicQuotient<R>
+where
+    R: EuclideanDomain + UniformlySampleableRing,
+{
+    fn uniform_sampling_policy(&self) -> Self::SamplingPolicy {
+        self.as_extension().uniform_sampling_policy()
+    }
+}
+
 impl<R> SampleableRing for AlgebraicQuotient<R>
 where
     R: EuclideanDomain + SampleableRing,
 {
-    type SamplingPolicy = R::SamplingPolicy;
+    type SamplingPolicy = AlgebraicSamplingPolicy<R::SamplingPolicy>;
 
     fn sample<G: rand::RngCore + ?Sized>(
         &self,
@@ -2797,6 +2953,57 @@ impl<R: Field + PolynomialGCD<E>, E: PositiveExponent>
 }
 
 impl AlgebraicExtension<Q> {
+    /// Select the principal d-th root of a nonzero, nonpositive-real element.
+    /// Among its nonreal d-th roots the principal value has the largest real
+    /// part, with positive imaginary part breaking the tie on the negative
+    /// real axis. Root ordering and matching use certified rational enclosures.
+    fn principal_radical(&self, base: &AlgebraicNumber<Q>, degree: u64) -> Result<Root<Q>, String> {
+        if degree < 2 || self.is_zero(base) {
+            return Err("Expected a nonzero radical of degree at least two".into());
+        }
+        let minimal = self.minimal_polynomial_of_element(base);
+        let base_index = self.root_index_of_element(base, &minimal)?;
+        let base_root = minimal
+            .to_univariate_from_univariate(0)
+            .root(base_index)
+            .ok_or("Missing algebraic embedding")?;
+        let mut polynomial = minimal.zero();
+        for term in &minimal {
+            let exponent = u64::from(term.exponents[0])
+                .checked_mul(degree)
+                .and_then(|e| u16::try_from(e).ok())
+                .ok_or("Algebraic root degree exceeds the exponent range")?;
+            polynomial.append_monomial(term.coefficient.clone(), &[exponent]);
+        }
+        let mut candidates = polynomial
+            .to_univariate_from_univariate(0)
+            .isolate_roots()
+            .into_iter()
+            .map(|(root, _)| root)
+            .collect::<Vec<_>>();
+        let power = minimal
+            .zero()
+            .monomial(Rational::one(), vec![degree as u16])
+            .to_univariate_from_univariate(0);
+        let matches = base_root
+            .matching_roots(None, &mut candidates, Some(&power), degree as usize)
+            .map_err(|error| error.to_string())?;
+        for index in matches.into_iter().rev() {
+            let candidate = &mut candidates[index];
+            if matches!(
+                candidate.classify_location(),
+                RootLocation::Complex | RootLocation::Imaginary
+            ) {
+                let polynomial = candidate
+                    .defining_polynomial()
+                    .map_coeff(|c| c.re.clone(), Q)
+                    .to_multivariate::<u16>();
+                return Root::new(polynomial, candidate.index());
+            }
+        }
+        Err("Could not select the principal complex radical".into())
+    }
+
     /// Return the selected primitive root, using its structural embedding
     /// witness when this field was built from explicitly selected roots.
     fn isolated_embedding(&self) -> Option<IsolatedRoot> {

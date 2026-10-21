@@ -90,21 +90,25 @@ pub mod prelude {
         AliasedAtom, Atom, AtomCore, AtomIndex, AtomOrView, AtomType, AtomView, EvaluationError,
         EvaluationInfo, FunctionArgument, FunctionBuilder, Indeterminate, InlineNum, InlineVar,
         PolynomialConversionError, SeriesError, Symbol, TensorCanonicalizationError, UserData,
-        UserDataKey,
+        UserDataKey, ZeroTestSettings,
     };
 
     pub use crate::coefficient::{Coefficient, CoefficientView, ConvertToRing};
 
     pub use crate::domains::{
         EuclideanDomain, Field, OrderedRing, RealEmbedding, Ring, RingOps, SampleableRing, Set,
+        UniformlySampleableRing,
         algebraic::{
             AlgebraicContext, AlgebraicEmbedding, AlgebraicExtension, AlgebraicNumber,
-            AlgebraicQuotient, Root,
+            AlgebraicQuotient, AlgebraicSamplingPolicy, Root,
         },
         atom::AtomField,
         dual::HyperDual,
         factorized_rational_polynomial::FactorizedRationalPolynomial,
-        finite_field::{FiniteField, FiniteFieldCore, FiniteFieldElement, Z2, Zp, Zp64},
+        finite_field::{
+            FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldSamplingPolicy, Z2, Zp,
+            Zp64,
+        },
         float::{
             Complex, Constructible, DoubleFloat, ErrorPropagatingFloat, F64, Float, FloatLike,
             Real, RealLike, SingleFloat,

@@ -1330,6 +1330,9 @@ impl<'a> AtomView<'a> {
                         )),
                         false,
                     ));
+                    // Use the same scope-local cache as arithmetic expressions.
+                    // This branch returns before the common insertion below.
+                    subexpressions.insert(*self, temp);
                     return Ok(temp);
                 } else {
                     return Err(EvaluationError::UndefinedFunction {
@@ -4575,124 +4578,72 @@ impl<'a> AtomView<'a> {
             }
         }
     }
+}
 
-    /// Check if the expression could be 0, using (potentially) numerical sampling with
-    /// a given tolerance and number of iterations.
-    pub fn zero_test(&self, iterations: usize, tolerance: f64) -> ConditionResult {
-        match self {
-            AtomView::Num(num_view) => {
-                if num_view.is_zero() {
-                    ConditionResult::True
-                } else {
-                    ConditionResult::False
-                }
-            }
-            AtomView::Var(_) => ConditionResult::False,
-            AtomView::Fun(_) => ConditionResult::False,
-            AtomView::Pow(p) => p.get_base().zero_test(iterations, tolerance),
-            AtomView::Mul(mul_view) => {
-                let mut is_zero = ConditionResult::False;
-                for arg in mul_view {
-                    match arg.zero_test(iterations, tolerance) {
-                        ConditionResult::True => return ConditionResult::True,
-                        ConditionResult::False => {}
-                        ConditionResult::Inconclusive => {
-                            is_zero = ConditionResult::Inconclusive;
-                        }
-                    }
-                }
+#[cfg(test)]
+mod external_cache_tests {
+    use crate::{
+        atom::{Atom, AtomCore, EvaluationInfo, Symbol},
+        domains::float::{Complex, Real},
+        evaluate::OptimizationSettings,
+        function, symbol,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
-                is_zero
-            }
-            AtomView::Add(_) => self.zero_test_impl(iterations, tolerance),
+    fn settings() -> OptimizationSettings {
+        OptimizationSettings::new()
+            .direct_translation(true)
+            .horner_iterations(0)
+            .cpe_iterations(Some(0))
+    }
+
+    fn counted<T: Real>(calls: Arc<AtomicUsize>) -> impl Fn(&[T]) -> T + Clone {
+        move |arguments: &[T]| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            arguments[0].clone() * &arguments[0]
         }
     }
 
-    fn zero_test_impl(&self, iterations: usize, tolerance: f64) -> ConditionResult {
-        // collect all variables and functions and fill in random variables
+    fn square(name: &str) -> (Symbol, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let f = symbol!(
+            name,
+            eval = EvaluationInfo::new()
+                .register(counted::<f64>(calls.clone()))
+                .register(counted::<Complex<f64>>(calls.clone()))
+        );
+        (f, calls)
+    }
 
-        let mut rng = MonteCarloRng::new(0, 0);
-
-        // TODO: actually check if the expression is real for any real input sample
-        if !self.is_real().is_true() {
-            let mut vars: HashMap<_, _> = self
-                .get_all_indeterminates(true)
-                .into_iter()
-                .filter_map(|x| {
-                    let s = x.get_symbol().unwrap();
-                    if !State::is_fixed_builtin(s) || s == Symbol::DERIVATIVE {
-                        Some((x, Complex::new(0f64.into(), 0f64.into())))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            for _ in 0..iterations {
-                for x in vars.values_mut() {
-                    *x = x.sample_unit(&mut rng);
-                }
-
-                let r = self
-                    .evaluate::<_, Complex<ErrorPropagatingFloat<f64>>>(&vars, 53)
-                    .unwrap();
-
-                let res_re = r.re.get_num().to_f64();
-                let res_im = r.im.get_num().to_f64();
-                if res_re.is_finite()
-                    && (res_re - r.re.get_absolute_error() > 0.
-                        || res_re + r.re.get_absolute_error() < 0.)
-                    || res_im.is_finite()
-                        && (res_im - r.im.get_absolute_error() > 0.
-                            || res_im + r.im.get_absolute_error() < 0.)
-                {
-                    return ConditionResult::False;
-                }
-
-                if vars.is_empty() && r.re.get_absolute_error() < tolerance {
-                    return ConditionResult::True;
-                }
-            }
-
-            ConditionResult::Inconclusive
-        } else {
-            let mut vars: HashMap<_, ErrorPropagatingFloat<f64>> = self
-                .get_all_indeterminates(true)
-                .into_iter()
-                .filter_map(|x| {
-                    let s = x.get_symbol().unwrap();
-                    if !State::is_fixed_builtin(s) || s == Symbol::DERIVATIVE {
-                        Some((x, 0f64.into()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            for _ in 0..iterations {
-                for x in vars.values_mut() {
-                    *x = x.sample_unit(&mut rng);
-                }
-
-                let r = self.evaluate(&vars, 53).unwrap();
-
-                let res = r.get_num().to_f64();
-
-                // trust the error when the relative error is less than 20%
-                if res != 0.
-                    && res.is_finite()
-                    && r.get_absolute_error() / res.abs() < 0.2
-                    && (res - r.get_absolute_error() > 0. || res + r.get_absolute_error() < 0.)
-                {
-                    return ConditionResult::False;
-                }
-
-                if vars.is_empty() && r.get_absolute_error() < tolerance {
-                    return ConditionResult::True;
-                }
-            }
-
-            ConditionResult::Inconclusive
-        }
+    #[test]
+    fn direct_external_calls_share_across_vector_outputs_without_optimizer() {
+        let (f, calls) = square("direct_external_cache::vector_f");
+        let x = Atom::var(symbol!("direct_external_cache::vector_x"));
+        let value = function!(f, &x);
+        let exact = Atom::evaluator_multiple(
+            &[value.clone(), &value + 1, 3 * &value],
+            std::slice::from_ref(&x),
+        )
+        .optimization_settings(settings())
+        .build()
+        .unwrap();
+        let mut real = exact.clone().map_coeff(&|c| c.re.to_f64());
+        let mut output = [0.; 3];
+        real.evaluate(&[2.], &mut output);
+        assert_eq!(output, [4., 5., 12.]);
+        assert_eq!(calls.swap(0, Ordering::SeqCst), 1);
+        real.evaluate(&[3.], &mut output);
+        assert_eq!(output, [9., 10., 27.]);
+        assert_eq!(calls.swap(0, Ordering::SeqCst), 1);
+        let mut complex = exact.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()));
+        let mut output = [Complex::new(0., 0.); 3];
+        complex.evaluate(&[Complex::new(2., 1.)], &mut output);
+        assert_eq!(output[0], Complex::new(3., 4.));
+        assert_eq!(output[1], Complex::new(4., 4.));
+        assert_eq!(output[2], Complex::new(9., 12.));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

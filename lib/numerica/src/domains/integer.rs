@@ -244,8 +244,13 @@ impl bincode::Encode for Integer {
                 val.get().encode(encoder)
             }
             Integer::Large(val) => {
-                2u8.encode(encoder)?;
-                let bytes = mp_to_be_bytes(val);
+                let bytes = if val.is_negative() {
+                    3u8.encode(encoder)?;
+                    mp_to_be_bytes(&val.as_abs())
+                } else {
+                    2u8.encode(encoder)?;
+                    mp_to_be_bytes(val)
+                };
                 bytes.encode(encoder)
             }
         }
@@ -269,11 +274,11 @@ impl<Context> bincode::Decode<Context> for Integer {
                 let val = i128::decode(decoder)?;
                 Ok(Integer::from_double(val))
             }
-            2 => {
+            2 | 3 => {
                 let b = Vec::<u8>::decode(decoder)?;
                 let val =
                     mp_from_be_bytes(&b).map_err(|e| bincode::error::DecodeError::Other(e))?;
-                Ok(Integer::Large(val))
+                Ok(Integer::Large(if variant == 3 { -val } else { val }))
             }
             _ => Err(bincode::error::DecodeError::OtherString(format!(
                 "Invalid variant for Integer: {}",
@@ -955,25 +960,30 @@ impl Integer {
 
     #[inline]
     fn shl_usize(&self, rhs: usize) -> Integer {
+        // checked_shl only checks the shift distance. Recovering the original
+        // value with an arithmetic right shift also checks signed overflow.
         match self {
             Integer::Single(n) => {
                 if rhs < i64::BITS as usize
-                    && let Some(n) = n.checked_shl(rhs as u32)
+                    && let Some(shifted) = n.checked_shl(rhs as u32)
+                    && shifted >> rhs == *n
                 {
-                    Integer::Single(n)
+                    Integer::Single(shifted)
                 } else if rhs < i128::BITS as usize
-                    && let Some(n) = (*n as i128).checked_shl(rhs as u32)
+                    && let Some(shifted) = (*n as i128).checked_shl(rhs as u32)
+                    && shifted >> rhs == *n as i128
                 {
-                    Integer::from_double(n)
+                    Integer::from_double(shifted)
                 } else {
                     Integer::from(MultiPrecisionInteger::from(*n) << rhs)
                 }
             }
             Integer::Double(n) => {
                 if rhs < i128::BITS as usize
-                    && let Some(n) = n.get().checked_shl(rhs as u32)
+                    && let Some(shifted) = n.get().checked_shl(rhs as u32)
+                    && shifted >> rhs == n.get()
                 {
-                    Integer::from_double(n)
+                    Integer::from_double(shifted)
                 } else {
                     Integer::from(MultiPrecisionInteger::from(n.get()) << rhs)
                 }
@@ -2040,7 +2050,9 @@ impl Integer {
     /// where every element of `a` is less than `max_coeff`, using a specified tolerance and number
     /// of iterations. The parameter `gamma` must be more than or equal to `2/sqrt(3)`.
     ///
-    /// If the procedure runs out of iterations, the current best solution is returned.
+    /// If the procedure runs out of iterations, the current best candidate is returned
+    /// in [`IntegerRelationError::IterationLimit`]. Initial Hermite reduction does not
+    /// count towards `max_iter` and can already find a relation.
     pub fn solve_integer_relation<
         T: FloatLike
             + RealLike
@@ -2093,6 +2105,21 @@ impl Integer {
 
         let mut b = Matrix::identity(n as u32, IntegerRing);
 
+        let relation = |y: &[T], b: &Matrix<IntegerRing>| {
+            let i = y.iter().position(|yy| yy.norm() < tolerance)?;
+            let res = (0..n as u32)
+                .map(|j| b[(j, i as u32)].clone())
+                .collect::<Vec<_>>();
+            if max_coeff
+                .as_ref()
+                .is_none_or(|bound| res.iter().all(|r| &r.abs() <= bound))
+            {
+                Some(res)
+            } else {
+                None
+            }
+        };
+
         macro_rules! hermite_reduction {
             ($i: expr, $j: expr) => {
                 if h[($j, $j)].is_zero() {
@@ -2125,6 +2152,13 @@ impl Integer {
             for j in (0..i).rev() {
                 hermite_reduction!(i, j);
             }
+        }
+
+        // Initial reduction can already produce a relation, including an exact
+        // zero in y. Swapping rows before testing convergence may then put zero
+        // on the diagonal of h and incorrectly report a precision failure.
+        if let Some(res) = relation(&y, &b) {
+            return Ok(res);
         }
 
         for i in 0..max_iter {
@@ -2175,18 +2209,8 @@ impl Integer {
                 }
             }
 
-            if let Some(i) = y.iter().position(|yy| yy.norm() < tolerance) {
-                let res = (0..n as u32)
-                    .map(|j| b[(j, i as u32)].clone())
-                    .collect::<Vec<_>>();
-
-                if let Some(max_coeff) = &max_coeff {
-                    if res.iter().all(|r| &r.abs() <= max_coeff) {
-                        return Ok(res);
-                    }
-                } else {
-                    return Ok(res);
-                }
+            if let Some(res) = relation(&y, &b) {
+                return Ok(res);
             }
 
             // check the norm of the largest element once in a while
@@ -5213,6 +5237,37 @@ mod test {
     }
 
     #[test]
+    fn integer_left_shifts_preserve_value() {
+        let values = [
+            Integer::from(0),
+            Integer::from(1),
+            Integer::from(-1),
+            Integer::from(3),
+            Integer::from(-3),
+            Integer::from(i64::MAX),
+            Integer::from(i64::MIN),
+            Integer::from(i64::MAX as i128 + 1),
+            Integer::from(i64::MIN as i128 - 1),
+            Integer::from(i128::MAX),
+            Integer::from(i128::MIN),
+            Integer::from(MultiPrecisionInteger::from(1) << 200usize),
+            Integer::from(-(MultiPrecisionInteger::from(1) << 200usize)),
+        ];
+        for value in values {
+            for shift in [
+                0usize, 1, 2, 31, 62, 63, 64, 65, 100, 126, 127, 128, 129, 255,
+            ] {
+                let expected = Integer::from(value.clone().to_multi_prec() << shift);
+                assert_eq!(&value << shift, expected, "borrowed {value} << {shift}");
+                assert_eq!(value.clone() << shift, expected, "owned {value} << {shift}");
+                let mut assigned = value.clone();
+                assigned <<= shift;
+                assert_eq!(assigned, expected, "assigned {value} << {shift}");
+            }
+        }
+    }
+
+    #[test]
     fn integer_bitand() {
         assert_eq!(
             Integer::from(0b1101) & Integer::from(0b1011),
@@ -5244,6 +5299,82 @@ mod test {
         .unwrap();
 
         assert_eq!(result, &[1, 5, 6]);
+    }
+
+    #[test]
+    fn pslq_initial_hermite_relation() {
+        for values in [[1, 1], [2, 1], [-1, 1]] {
+            for max_iter in [0, 1, 1000] {
+                let result = Integer::solve_integer_relation(
+                    &values.map(|v| F64::from(v as f64)),
+                    F64::from(1e-10),
+                    max_iter,
+                    Some(Integer::from(2)),
+                    None,
+                )
+                .unwrap();
+                assert!(!result[0].is_zero());
+                assert_eq!(&result[0] * values[0] + &result[1] * values[1], 0);
+            }
+        }
+    }
+
+    #[cfg(feature = "float-mpfr")]
+    #[test]
+    fn pslq_initial_hermite_relation_multiprecision() {
+        for bits in [132, 256, 1000] {
+            for values in [[1, 1], [2, 1]] {
+                let result = Integer::solve_integer_relation(
+                    &values.map(|v| Float::with_val(bits, v)),
+                    Float::parse("1e-30", Some(bits)).unwrap(),
+                    0,
+                    None,
+                    None,
+                )
+                .unwrap();
+                assert!(!result[0].is_zero());
+                assert_eq!(&result[0] * values[0] + &result[1] * values[1], 0);
+            }
+            let tiny = Float::parse("1e-40", Some(bits)).unwrap();
+            let result = Integer::solve_integer_relation(
+                &[tiny.clone(), tiny],
+                Float::parse("1e-30", Some(bits)).unwrap(),
+                0,
+                Some(Integer::one()),
+                None,
+            )
+            .unwrap();
+            assert_eq!(result[0].abs(), 1);
+            assert_eq!(&result[0] + &result[1], 0);
+        }
+    }
+
+    #[test]
+    fn pslq_initial_check_preserves_limits() {
+        // The initial relation [1,-2] must not bypass the coefficient bound.
+        let result = Integer::solve_integer_relation(
+            &[F64::from(2.), F64::from(1.)],
+            F64::from(1e-10),
+            0,
+            Some(Integer::one()),
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(super::IntegerRelationError::IterationLimit(_))
+        ));
+        // Without convergence, zero iterations still returns an error/candidate.
+        let result = Integer::solve_integer_relation(
+            &[F64::from(2.0_f64.sqrt()), F64::from(1.)],
+            F64::from(1e-10),
+            0,
+            None,
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(super::IntegerRelationError::IterationLimit(_))
+        ));
     }
 
     #[cfg(feature = "float-mpfr")]

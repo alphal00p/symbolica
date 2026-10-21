@@ -275,8 +275,7 @@ impl<F: Ring> Series<F> {
             field: field.clone(),
             variable,
             shift: 0,
-            order: order.numerator().to_i64().unwrap() as usize
-                * order.denominator().to_i64().unwrap() as usize,
+            order: order.numerator().to_i64().unwrap() as usize,
             ramification: order.denominator().to_i64().unwrap() as usize,
         }
     }
@@ -291,7 +290,7 @@ impl<F: Ring> Series<F> {
             expansion_point: self.expansion_point.clone(),
             shift: 0,
             order: self.order,
-            ramification: 1,
+            ramification: self.ramification,
         }
     }
 
@@ -310,7 +309,7 @@ impl<F: Ring> Series<F> {
             expansion_point: self.expansion_point.clone(),
             shift: 0,
             order: self.order,
-            ramification: 1,
+            ramification: self.ramification,
         }
     }
 
@@ -324,7 +323,7 @@ impl<F: Ring> Series<F> {
             expansion_point: self.expansion_point.clone(),
             shift: 0,
             order: self.order,
-            ramification: 1,
+            ramification: self.ramification,
         }
     }
 
@@ -363,8 +362,8 @@ impl<F: Ring> Series<F> {
             field: self.field.clone(),
             variable: self.variable.clone(),
             expansion_point: self.expansion_point.clone(),
-            shift: n * d as isize,
-            order: self.order * ram / d,
+            shift: n * (ram / d) as isize,
+            order: self.order * (ram / self.ramification),
             ramification: ram,
         }
     }
@@ -376,15 +375,7 @@ impl<F: Ring> Series<F> {
             return self.monomial(self.field.one(), (1, 1).into());
         }
 
-        Self {
-            coefficients: vec![coeff, self.field.one()],
-            field: self.field.clone(),
-            variable: self.variable.clone(),
-            expansion_point: self.expansion_point.clone(),
-            shift: 0,
-            order: self.order,
-            ramification: 1,
-        }
+        self.constant(coeff) + self.monomial(self.field.one(), (1, 1).into())
     }
 
     /// Get the field of the series coefficients.
@@ -496,9 +487,10 @@ impl<F: Ring> Series<F> {
 
     /// Truncate the series to the desired absolute order.
     /// If the new order is larger, nothing happens.
+    /// An empty series retains its known order since no terms need to be removed.
     #[inline]
     pub fn truncate_absolute_order(&mut self, order: Rational) {
-        if self.absolute_order() < order {
+        if self.coefficients.is_empty() || self.absolute_order() < order {
             return;
         }
 
@@ -1105,7 +1097,11 @@ impl<'a, F: Ring> Mul<&'a Series<F>> for &Series<F> {
             variable: self.variable.clone(),
             expansion_point: self.expansion_point.clone(),
             shift: self.shift * r_d_s as isize + rhs.shift * r_d_o as isize,
-            order: (self.order * r_d_s).min(rhs.order * r_d_o),
+            // The infinite-precision identity can overflow when its grid is refined.
+            order: self
+                .order
+                .saturating_mul(r_d_s)
+                .min(rhs.order.saturating_mul(r_d_o)),
             ramification: r,
         };
 
@@ -1202,6 +1198,28 @@ impl<F: EuclideanDomain> Series<F> {
 }
 
 impl Series<AtomField> {
+    /// Remove coefficients at the lowest powers that the zero test proves zero.
+    pub(crate) fn normalize_trailing_coefficient(&mut self) {
+        let zeros = self
+            .coefficients
+            .iter()
+            .take_while(|c| c.check_zero().is_true())
+            .count();
+        if zeros == 0 {
+            return;
+        }
+
+        if zeros == self.coefficients.len() {
+            self.coefficients.clear();
+            self.shift += self.order as isize;
+            self.order = 0;
+        } else {
+            self.coefficients.drain(..zeros);
+            self.shift += zeros as isize;
+            self.order -= zeros;
+        }
+    }
+
     /// Extract powers of `x` from an expression that comes from simplifying an exponential with logs
     /// i.e.: `exp(c + 3 log(x^5)) = exp(c)*x^15`.
     fn extract_exp_log(&self, e: AtomView, s: AtomView) -> Result<Self, SeriesError> {
@@ -1477,30 +1495,32 @@ impl Series<AtomField> {
             return Ok(self.npow(pow.numerator().to_i64().unwrap() as usize));
         }
 
-        let c = self.get_trailing_coefficient();
-
-        if c.is_zero() {
+        let mut base = self.clone();
+        base.normalize_trailing_coefficient();
+        if base.is_zero() {
             if pow.is_negative() {
                 return Err(SeriesError::DivisionByZero);
             }
 
-            let mut r = self.clone();
-            r.shift *= pow.numerator().to_i64().unwrap() as isize;
-            r.ramification *= pow.denominator().to_i64().unwrap() as usize;
-            return Ok(r);
+            base.shift *= pow.numerator().to_i64().unwrap() as isize;
+            base.order *= pow.numerator().to_i64().unwrap() as usize;
+            base.ramification *= pow.denominator().to_i64().unwrap() as usize;
+            return Ok(base);
         }
 
-        let c = self.coefficients[0].clone();
+        let c = base.coefficients[0].clone();
+        let order = base.order;
+        let shift = base.shift;
+        let p = Rational::from((base.shift as i64, base.ramification as i64)) * &pow;
+        let mut r = base.one();
+        let mut x = base.one();
 
         // normalize the series to 1 + ...
-        let cc = self.clone().div_coeff(&c).mul_exp_units(-self.shift) - self.one();
-
-        let mut r = self.one();
-        let mut x = self.one();
+        let cc = base.div_coeff(&c).mul_exp_units(-shift) - r.one();
 
         let mut num = Rational::one();
 
-        for i in 1..=self.order {
+        for i in 1..=order {
             num = &num * &(&pow - &(i as i64 - 1).into());
 
             x = x * &cc;
@@ -1513,10 +1533,7 @@ impl Series<AtomField> {
             r = r + p;
         }
 
-        let pow_ram = pow.denominator().to_i64().unwrap() as usize;
-        r.change_ramification(pow_ram);
-
-        let p = Rational::from((self.shift as i64, self.ramification as i64)) * &pow;
+        r.change_ramification(p.denominator().to_i64().unwrap() as usize);
 
         let shift = p.numerator().to_i64().unwrap() as isize
             * (r.ramification / p.denominator().to_i64().unwrap() as usize) as isize;
@@ -1554,10 +1571,78 @@ impl Series<AtomField> {
 mod tests {
     use crate::{
         atom::{Atom, AtomCore},
+        domains::rational::{Q, Rational},
         parse,
-        poly::series::SeriesDepth,
+        poly::series::{Series, SeriesDepth},
         symbol,
     };
+    use std::sync::Arc;
+
+    #[test]
+    fn absolute_truncation_preserves_finite_zero_precision() {
+        let x = symbol!("absolute_zero_precision_x");
+        for known_order in [Rational::from(6), (3, 2).into()] {
+            let prototype =
+                Series::new(&Q, None, Arc::new(x.into()), 0.into(), known_order.clone());
+            for requested in [
+                known_order.clone(),
+                (1, 3).into(),
+                0.into(),
+                (-2).into(),
+                7.into(),
+            ] {
+                let mut zero = prototype.zero();
+                zero.truncate_absolute_order(requested.clone());
+                assert_eq!(zero.absolute_order(), known_order);
+                assert_eq!(
+                    zero.coefficient(known_order.clone() - Rational::from(1)),
+                    Some(0.into())
+                );
+                assert_eq!(zero.coefficient(known_order.clone()), None);
+                zero.truncate_absolute_order(requested);
+                assert_eq!(zero.absolute_order(), known_order);
+            }
+        }
+    }
+
+    #[test]
+    fn absolute_truncation_keeps_leading_zero_information() {
+        let x = symbol!("absolute_last_term_x");
+        let prototype = Series::new(&Q, None, Arc::new(x.into()), 0.into(), 6.into());
+        for (exponent, order) in [
+            (Rational::from(4), Rational::from(2)),
+            ((-1).into(), (-2).into()),
+            ((1, 2).into(), (1, 3).into()),
+        ] {
+            let mut series = prototype.monomial(1.into(), exponent.clone());
+            series.truncate_absolute_order(order);
+            assert!(series.is_zero());
+            assert_eq!(series.absolute_order(), exponent);
+            assert_eq!(
+                series.coefficient(exponent.clone() - Rational::from(1)),
+                Some(0.into())
+            );
+            assert_eq!(series.coefficient(exponent), None);
+        }
+    }
+
+    #[test]
+    fn absolute_truncation_after_cancellation_preserves_known_zeros() {
+        let x = symbol!("absolute_cancelled_x");
+        let series = parse!("absolute_cancelled_x^2").series(x, 0, 6).unwrap();
+        let mut zero = &series - &series;
+        let known_order = zero.absolute_order();
+        zero.truncate_absolute_order(3.into());
+        assert_eq!(zero.absolute_order(), known_order);
+        assert_eq!(zero.coefficient(6.into()), Some(Atom::Zero));
+        assert_eq!(zero.coefficient(known_order), None);
+
+        let mut nonzero = parse!("1+absolute_cancelled_x^4").series(x, 0, 6).unwrap();
+        nonzero.truncate_absolute_order(3.into());
+        assert_eq!(nonzero.coefficient(0.into()), Some(Atom::num(1)));
+        assert_eq!(nonzero.coefficient(2.into()), Some(Atom::Zero));
+        assert_eq!(nonzero.coefficient(3.into()), None);
+    }
 
     #[test]
     fn coefficient_distinguishes_unknown_from_zero() {
@@ -1611,5 +1696,131 @@ mod tests {
 
         let b = a.map_coeff(|x| x.expand());
         assert_eq!(b.get_trailing_exponent(), 1);
+    }
+
+    #[test]
+    fn reciprocal_retries_after_exact_coefficient_cancellation() {
+        let x = parse!("series_cancellation_x");
+        for text in [
+            "(a+1)^2-a^2-2*a-1",
+            "1/a-1/(a+1)-1/(a*(a+1))",
+            "(a+1i*b)^2-a^2-2i*a*b+b^2",
+            "sin(a)^2+cos(a)^2-1",
+            "sqrt(2)*sqrt(3)-sqrt(6)",
+        ] {
+            let c = parse!(text);
+            assert!(!c.is_zero(), "{text}");
+            assert!(c.check_zero().is_true(), "{text}");
+            for power in [1, 2, 4, 10] {
+                // Start with the original 1/(c+x) regression, then cancel two
+                // coefficients and force deeper expansion to find a nonzero one.
+                let zeros = if power == 1 { c.clone() } else { &c * (&x + 1) };
+                let input = (zeros + x.pow(power)).pow(-1);
+                let result = input
+                    .series(
+                        symbol!("series_cancellation_x"),
+                        0,
+                        SeriesDepth::absolute(1),
+                    )
+                    .unwrap();
+                assert_eq!(result.to_atom(), x.pow(-power), "{input}");
+                assert_eq!(result.get_trailing_exponent(), -power, "{input}");
+            }
+        }
+    }
+
+    #[test]
+    fn rational_powers_remove_exact_zero_leading_coefficients() {
+        let x = symbol!("series_rpow_cancellation_x");
+        let c = parse!("1/a-1/(a+1)-1/(a*(a+1))");
+        let vanishing = &c * parse!("1+sqrt(series_rpow_cancellation_x)");
+        for text in [
+            "series_rpow_cancellation_x^2*(1+series_rpow_cancellation_x)",
+            "series_rpow_cancellation_x^(3/2)*(1+sqrt(series_rpow_cancellation_x))",
+        ] {
+            let clean = parse!(text).series(x, 0, SeriesDepth::absolute(4)).unwrap();
+            let base = (parse!(text) + &vanishing)
+                .series(x, 0, SeriesDepth::absolute(4))
+                .unwrap();
+            for power in [(-1, 1), (1, 2), (-1, 2)] {
+                let actual = base.rpow(power.into()).unwrap();
+                let expected = clean.rpow(power.into()).unwrap();
+                assert_eq!(actual.to_atom(), expected.to_atom(), "{text}, {power:?}");
+                assert_eq!(actual.absolute_order(), expected.absolute_order());
+            }
+        }
+
+        let zero = vanishing.series(x, 0, SeriesDepth::absolute(4)).unwrap();
+        assert!(matches!(
+            zero.rpow((-1, 1).into()),
+            Err(super::SeriesError::DivisionByZero)
+        ));
+        let root = zero.rpow((1, 2).into()).unwrap();
+        assert!(root.is_zero());
+        assert_eq!(
+            root.absolute_order(),
+            zero.absolute_order() / super::Rational::from(2)
+        );
+    }
+
+    #[test]
+    fn coefficient_cleanup_preserves_nonzero_and_unresolved_terms() {
+        for text in ["(a+1)^2-a^2-2*a-1+1/10^100", "log(2)+log(3)-log(6)"] {
+            let coefficient = parse!(text);
+            assert!(!coefficient.together().is_zero());
+            let mut series = (coefficient.clone() + parse!("series_cleanup_x"))
+                .series(symbol!("series_cleanup_x"), 0, SeriesDepth::absolute(2))
+                .unwrap();
+            let original = series.to_atom();
+            let order = series.absolute_order();
+            series.normalize_trailing_coefficient();
+            assert_eq!(series.get_trailing_coefficient(), coefficient);
+            assert_eq!(series.to_atom(), original);
+            assert_eq!(series.absolute_order(), order);
+        }
+    }
+}
+
+#[cfg(test)]
+mod puiseux_tests {
+    use crate::{
+        atom::{Atom, AtomCore},
+        parse,
+        poly::series::SeriesDepth,
+        symbol,
+    };
+
+    #[test]
+    fn fractional_product_and_laurent_series_have_correct_coefficients() {
+        let x = symbol!("puiseux_precision::x");
+        let s = parse!("puiseux_precision::x^(1/3)*(1+puiseux_precision::x)^(1/2)")
+            .series(x, 0, SeriesDepth::absolute((7, 3)))
+            .unwrap();
+        for (exponent, coefficient) in [((1, 3), (1, 1)), ((4, 3), (1, 2)), ((7, 3), (-1, 8))] {
+            assert_eq!(s.coefficient(exponent.into()), Some(Atom::num(coefficient)));
+        }
+        let square = (&s * &s).map_coeff(|a| a.expand());
+        assert_eq!(square.coefficient((2, 3).into()), Some(Atom::num(1)));
+        assert_eq!(square.coefficient((5, 3).into()), Some(Atom::num(1)));
+        assert_eq!(square.coefficient((8, 3).into()), Some(Atom::Zero));
+        let pole = parse!("puiseux_precision::x^(-1/3)*(1+puiseux_precision::x)")
+            .series(x, 0, SeriesDepth::absolute((2, 3)))
+            .unwrap();
+        assert_eq!(pole.coefficient((-1, 3).into()), Some(Atom::num(1)));
+        assert_eq!(pole.coefficient((2, 3).into()), Some(Atom::num(1)));
+    }
+
+    #[test]
+    fn fractional_depth_at_nonzero_centre_and_integer_control() {
+        let x = symbol!("puiseux_precision::x");
+        for depth in [SeriesDepth::absolute((7, 3)), SeriesDepth::absolute(3)] {
+            let s = parse!("puiseux_precision::x^2")
+                .series(x, 2, depth)
+                .unwrap();
+            assert_eq!(s.coefficient(0.into()), Some(Atom::num(4)));
+            assert_eq!(s.coefficient(1.into()), Some(Atom::num(4)));
+            assert_eq!(s.coefficient(2.into()), Some(Atom::num(1)));
+            assert_eq!(s.coefficient((1, 3).into()), Some(Atom::Zero));
+        }
     }
 }

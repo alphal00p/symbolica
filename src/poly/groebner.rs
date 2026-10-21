@@ -767,20 +767,24 @@ impl<E: Exponent, O: MonomialOrder> Ord for OrderedMonomial<E, O> {
 impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
     /// Construct a Groebner basis for a polynomial ideal.
     ///
+    /// Zero generators are ignored. The zero ideal has an empty basis.
+    ///
     /// Progress can be monitored with `print_stats`.
     pub fn new(
         ideal: &[MultivariatePolynomial<R, E, O>],
         print_stats: bool,
     ) -> GroebnerBasis<R, E, O> {
+        let mut ideal = ideal.to_vec();
+        MultivariatePolynomial::unify_variables_list(&mut ideal);
+        // F4 normalizes every generator by its leading coefficient. Preserve
+        // the common variable map, then remove zeros before that division.
+        ideal.retain(|polynomial| !polynomial.is_zero());
         if ideal.is_empty() {
             return GroebnerBasis {
                 system: Vec::new(),
                 print_stats,
             };
         }
-
-        let mut ideal = ideal.to_vec();
-        MultivariatePolynomial::unify_variables_list(&mut ideal);
 
         let mut b = GroebnerBasis {
             system: ideal,
@@ -862,7 +866,7 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
             selected_polys.clear();
             let mut i = critical_pairs.len() - 1;
 
-            let mut l_tmp = vec![];
+            let mut selected_multiples: HashMap<usize, HashSet<Vec<E>>> = HashMap::default();
             loop {
                 if critical_pairs[i].degree == lowest_lcm_deg {
                     let pair = critical_pairs.swap_remove(i);
@@ -872,11 +876,14 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
                         (pair.index_sec, pair.lcm_diff_sec),
                     ];
                     for poly_info in e {
-                        if !l_tmp.contains(&poly_info) {
+                        if selected_multiples
+                            .entry(poly_info.0)
+                            .or_default()
+                            .insert(poly_info.1.clone())
+                        {
                             let new_f1 =
                                 Self::simplify(&mut simplifications[poly_info.0], &poly_info.1);
                             selected_polys.push(new_f1);
-                            l_tmp.push(poly_info);
                         }
                     }
                 }
@@ -939,6 +946,10 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
                         }
 
                         let pp = Self::simplify(&mut simplifications[*index], &exp);
+                        selected_multiples
+                            .entry(*index)
+                            .or_default()
+                            .insert(exp.clone());
                         new_polys.push(pp);
                     }
                 }
@@ -1046,6 +1057,15 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
                                 .zip(g.last_exponents())
                             {
                                 *d = *pi - *gi;
+                            }
+
+                            // Only this batch's inputs may be replaced by its reduced rows.
+                            // Matching a leading monomial alone can erase an unprocessed pair.
+                            if !selected_multiples
+                                .get(g_ind)
+                                .is_some_and(|multiples| multiples.contains(&diff))
+                            {
+                                continue;
                             }
 
                             for (diff_e, p) in &mut simplifications[*g_ind] {
@@ -3563,5 +3583,81 @@ mod test {
             GroebnerBasis::is_groebner_basis(&basis.system),
             "F4 returned an incomplete basis"
         );
+    }
+}
+
+#[cfg(test)]
+mod f4_cache_tests {
+    use crate::{
+        atom::{Atom, AtomCore},
+        domains::rational::Q,
+        poly::{PolyVariable, groebner::GroebnerBasis},
+        symbol,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn simplification_preserves_unprocessed_critical_pairs() {
+        let variables = Arc::new(
+            ["x", "u", "z", "v"]
+                .map(|name| PolyVariable::from(symbol!(format!("f4_cache_regression::{name}"))))
+                .to_vec(),
+        );
+        let parse = |text| {
+            Atom::parse(text, "f4_cache_regression", Default::default())
+                .unwrap()
+                .try_to_polynomial::<_, u16>(&Q, variables.clone())
+                .unwrap()
+        };
+        let input = ["x^2-x-z", "u-x*u-1", "2*x*v-v-1"].map(parse);
+        let basis = GroebnerBasis::new(&input, false);
+        assert!(GroebnerBasis::is_groebner_basis(&basis.system));
+        assert!(input.iter().all(|f| f.reduce(&basis.system).is_zero()));
+        // This eliminant was lost when the same reduced row replaced two
+        // cached multiples even though only one had entered the matrix.
+        assert!(parse("(z+1/4)*v^2-1/4").reduce(&basis.system).is_zero());
+        assert!(!parse("1").reduce(&basis.system).is_zero());
+    }
+}
+
+#[cfg(test)]
+mod zero_generator_tests {
+    use crate::{
+        atom::{Atom, AtomCore},
+        domains::rational::Q,
+        parse,
+        poly::{PolyVariable, groebner::GroebnerBasis, polynomial::MultivariatePolynomial},
+        symbol,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn rational_ideal_ignores_zero_generators_in_every_position() {
+        let variables = Arc::new(vec![
+            PolyVariable::from(symbol!("zero_gb::x")),
+            PolyVariable::from(symbol!("zero_gb::y")),
+        ]);
+        let polynomials: Vec<MultivariatePolynomial<_, u16>> = [
+            parse!("zero_gb::x^2-zero_gb::y"),
+            parse!("zero_gb::x*zero_gb::y-1"),
+        ]
+        .iter()
+        .map(|p| p.to_polynomial(&Q, Some(variables.clone())))
+        .collect();
+        let zero = Atom::Zero.to_polynomial(&Q, Some(variables));
+        let expected = GroebnerBasis::new(&polynomials, false).system;
+        for position in 0..=polynomials.len() {
+            let mut with_zero = polynomials.clone();
+            with_zero.insert(position, zero.clone());
+            assert_eq!(GroebnerBasis::new(&with_zero, false).system, expected);
+        }
+    }
+
+    #[test]
+    fn zero_ideal_has_an_empty_basis() {
+        let zero: MultivariatePolynomial<_, u16> = Atom::Zero.to_polynomial(&Q, None);
+        for ideal in [vec![], vec![zero.clone()], vec![zero.clone(), zero]] {
+            assert!(GroebnerBasis::new(&ideal, false).system.is_empty());
+        }
     }
 }

@@ -63,6 +63,11 @@ where
 pub enum PolynomialConversionError {
     /// The requested polynomial variables are invalid, with an explanation.
     InvalidVariableMap(String),
+    /// A negative power has an identically zero base after polynomial conversion.
+    ZeroDenominator {
+        /// The expression containing the zero denominator.
+        expression: Atom,
+    },
     /// An expression cannot be represented as a polynomial in the requested ring.
     PolynomialConversionFailed {
         /// The expression that could not be converted.
@@ -130,6 +135,9 @@ impl std::fmt::Display for PolynomialConversionError {
         match self {
             PolynomialConversionError::InvalidVariableMap(e) => {
                 write!(f, "invalid variable map: {e}")
+            }
+            PolynomialConversionError::ZeroDenominator { expression } => {
+                write!(f, "zero denominator in {expression}")
             }
             PolynomialConversionError::PolynomialConversionFailed { expression, reason } => {
                 write!(
@@ -1533,7 +1541,15 @@ impl AtomView<'_> {
         &self,
         var_map: &Arc<Vec<PolyVariable>>,
     ) -> MultivariatePolynomial<AtomField, E> {
-        let poly = MultivariatePolynomial::<_, E>::new(&AtomField::new(), None, var_map.clone());
+        self.to_polynomial_in_vars_with_field(var_map, &AtomField::new())
+    }
+
+    pub(crate) fn to_polynomial_in_vars_with_field<E: Exponent>(
+        &self,
+        var_map: &Arc<Vec<PolyVariable>>,
+        field: &AtomField,
+    ) -> MultivariatePolynomial<AtomField, E> {
+        let poly = MultivariatePolynomial::<_, E>::new(field, None, var_map.clone());
         let mut polynomial = self.to_polynomial_in_vars_impl(var_map, &poly);
         polynomial.reduce_rational_power_variable_basis();
         polynomial
@@ -1549,9 +1565,9 @@ impl AtomView<'_> {
         var_map: &Arc<Vec<PolyVariable>>,
         poly: &MultivariatePolynomial<AtomField, E>,
     ) -> MultivariatePolynomial<AtomField, E> {
-        let field = AtomField::new();
+        let field = poly.ring();
         // see if the current term can be cast into a polynomial using a fast routine
-        if let Ok(num) = self.to_polynomial_expanded(&field, Some(var_map), false) {
+        if let Ok(num) = self.to_polynomial_expanded(field, Some(var_map), false) {
             return num;
         }
 
@@ -1639,7 +1655,7 @@ impl AtomView<'_> {
                         coefficients,
                         exponents,
                         var_map.clone(),
-                        &field,
+                        field,
                     )
                 }
             }
@@ -1801,6 +1817,11 @@ impl AtomView<'_> {
                         .to_rational_polynomial_impl(field, out_field, var_map)?;
 
                     return if nn < 0 {
+                        if b.is_zero() {
+                            return Err(PolynomialConversionError::ZeroDenominator {
+                                expression: self.to_owned(),
+                            });
+                        }
                         let b_inv = b.inv();
                         Ok(b_inv.pow(-nn as u64))
                     } else {
@@ -2001,6 +2022,11 @@ impl AtomView<'_> {
                         .to_factorized_rational_polynomial_impl(field, out_field, var_map)?;
 
                     return if nn < 0 {
+                        if b.is_zero() {
+                            return Err(PolynomialConversionError::ZeroDenominator {
+                                expression: self.to_owned(),
+                            });
+                        }
                         // invert first to prevent expansion of b^|nn|
                         let b_inv = b.inv();
                         Ok(b_inv.pow(nn.unsigned_abs()))

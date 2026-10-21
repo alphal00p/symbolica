@@ -10,6 +10,7 @@ use crate::{
     coefficient::{Coefficient, CoefficientView},
     domains::{Ring, atom::AtomField, integer::Integer, rational::Rational},
     error,
+    id::Pattern,
     poly::{
         PolyVariable,
         series::{Series, SeriesDepth, SeriesError},
@@ -391,8 +392,8 @@ impl AtomView<'_> {
             order.clone()
         };
 
-        // do not do an expensive statistical zero check at all stages during the series expansion
-        // note that a statistical check will be used in the case of negative exponents in the expansion
+        // Preserve unresolved symbolic coefficients during expansion. Negative
+        // exponents below retry only when the trailing coefficient is proven zero.
         let field = AtomField {
             statistical_zero_test: false,
             ..Default::default()
@@ -511,7 +512,9 @@ impl AtomView<'_> {
                         }
                         let a = f_eval.finish();
 
-                        let constant = a.replace(x.clone()).with(expansion_point.to_owned());
+                        let constant = a
+                            .replace(Pattern::Literal(Atom::from(x.clone())))
+                            .with(Pattern::Literal(expansion_point.to_owned()));
 
                         // TODO: depth is an overestimate
                         let order = info.absolute_order();
@@ -531,7 +534,9 @@ impl AtomView<'_> {
                                 break;
                             }
 
-                            let rep = d.replace(x.clone()).with(expansion_point.to_owned());
+                            let rep = d
+                                .replace(Pattern::Literal(Atom::from(x.clone())))
+                                .with(Pattern::Literal(expansion_point.to_owned()));
 
                             result = &result
                                 + &info
@@ -562,21 +567,14 @@ impl AtomView<'_> {
                             // it could be that the base series is exactly zero,
                             // to prevent an infinite loop, we stop the loop at ep^-1000
                             let mut current_depth = info.relative_order();
-                            let mut first_attempt = true;
 
-                            // make sure the trailing coefficient is not zero with a statistical test
-                            while first_attempt
-                                && !base_series
-                                    .get_trailing_coefficient()
-                                    .zero_test(10, 1e-5)
-                                    .is_false()
-                                || !first_attempt && base_series.is_zero() && current_depth < 1000
-                            {
+                            // Remove exact cancellations before choosing the leading power.
+                            // Unresolved function coefficients must survive.
+                            base_series.normalize_trailing_coefficient();
+                            while base_series.is_zero() && current_depth < 1000 {
+                                current_depth = &current_depth * &2.into();
                                 let info = Series::new(
-                                    &AtomField {
-                                        statistical_zero_test: true,
-                                        ..info.get_field().clone()
-                                    },
+                                    info.get_field(),
                                     None,
                                     info.get_variable().clone(),
                                     info.get_expansion_point().clone(),
@@ -585,8 +583,7 @@ impl AtomView<'_> {
                                 );
 
                                 base_series = base.series_impl(x, expansion_point, &info)?;
-                                current_depth = &current_depth * &2.into();
-                                first_attempt = false;
+                                base_series.normalize_trailing_coefficient();
                             }
                         }
 

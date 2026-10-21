@@ -5,7 +5,6 @@ use std::{
     borrow::Cow,
     cmp::Reverse,
     collections::{BinaryHeap, hash_map::Entry},
-    ops::RangeInclusive,
 };
 
 use ahash::{HashMap, HashSet, HashSetExt};
@@ -17,10 +16,11 @@ use crate::{
     combinatorics::CombinationIterator,
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, Set,
+        UniformlySampleableRing,
         algebraic::{AlgebraicExtension, GaloisField},
         finite_field::{
-            FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace,
-            PrimeIteratorU64, ToFiniteField, Zp,
+            FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldSamplingPolicy,
+            FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField, Zp,
         },
         integer::{Integer, IntegerRing, Z, gcd_unsigned},
         rational::{Q, RationalField},
@@ -31,7 +31,7 @@ use crate::{
 
 use super::{
     LexOrder, PositiveExponent,
-    gcd::{MAX_RNG_PREFACTOR, POW_CACHE_SIZE, PolynomialGCD},
+    gcd::{POW_CACHE_SIZE, PolynomialGCD},
     polynomial::MultivariatePolynomial,
 };
 
@@ -1125,12 +1125,12 @@ impl<'a, E: PositiveExponent> DenseZpEqualDegreeContext<'a, E> {
     /// Find one proper factor of the current equal-degree block.
     fn split<R: Rng + ?Sized>(&mut self, rng: &mut R) -> MultivariatePolynomial<Zp, E, LexOrder> {
         let degree = self.modulus.len() - 1;
-        let sampling_range = 0..=i64::from(self.field.get_prime() - 1);
+        let sampling_policy = FiniteFieldSamplingPolicy::default();
 
         loop {
             self.random_residue.clear();
             self.random_residue
-                .extend((0..degree).map(|_| self.field.sample(rng, &sampling_range)));
+                .extend((0..degree).map(|_| self.field.sample(rng, &sampling_policy)));
             DenseZpDistinctDegreeContext::<E>::trim(&self.field, &mut self.random_residue);
             if self.random_residue.len() <= 1 {
                 continue;
@@ -5102,9 +5102,7 @@ impl<E: PositiveExponent> Factorize
 
 impl<
     UField: FiniteFieldWorkspace,
-    F: GaloisField<Base = FiniteField<UField>>
-        + PolynomialGCD<E>
-        + SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    F: GaloisField<Base = FiniteField<UField>> + PolynomialGCD<E>,
     E: PositiveExponent,
 > Factorize for MultivariatePolynomial<F, E, LexOrder>
 where
@@ -5242,7 +5240,11 @@ where
                 order.sort_by_key(|o| Reverse(o.1));
                 let order: Vec<_> = order.into_iter().map(|(v, _)| v).collect();
 
-                f.bivariate_factorization(order[0], order[1]).len() == 1
+                f.bivariate_factorization(order[0], order[1])
+                    .iter()
+                    .filter(|factor| !factor.is_constant())
+                    .count()
+                    == 1
             }
             _ => {
                 // TODO: find better order
@@ -5255,7 +5257,11 @@ where
 
                 let mut order: Vec<_> = order.into_iter().map(|(v, _)| v).collect();
 
-                f.multivariate_factorization(&mut order, 10, None).len() == 1
+                f.multivariate_factorization(&mut order, 10, None)
+                    .iter()
+                    .filter(|factor| !factor.is_constant())
+                    .count()
+                    == 1
             }
         }
     }
@@ -5263,9 +5269,7 @@ where
 
 impl<
     UField: FiniteFieldWorkspace,
-    F: GaloisField<Base = FiniteField<UField>>
-        + PolynomialGCD<E>
-        + SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    F: GaloisField<Base = FiniteField<UField>> + PolynomialGCD<E>,
     E: PositiveExponent,
 > MultivariatePolynomial<F, E, LexOrder>
 where
@@ -5487,8 +5491,6 @@ where
         let mut random_poly = self.zero_with_capacity(d);
         let mut exp = vec![E::zero(); self.nvars()];
 
-        let characteristic = self.ring().characteristic();
-
         // compute inverse
         let mut s_rev = s.clone();
         s_rev.reverse();
@@ -5499,10 +5501,7 @@ where
             random_poly.clear();
 
             for i in 0..n {
-                let upper_bound = characteristic.to_i64().unwrap_or(i64::MAX);
-                let r = self
-                    .ring()
-                    .sample(&mut rng, &(0..=upper_bound.saturating_sub(1)));
+                let r = self.ring().sample_uniform(&mut rng);
                 if !self.ring().is_zero(&r) {
                     exp[var] = E::from_u32(i as u32);
                     random_poly.append_monomial(r, &exp);
@@ -5577,6 +5576,7 @@ where
     /// by Garrett Paluck. The formulation of the algorithm in other sources contain serious errors.
     // TODO: merge with an almost similar method for the integer case. A modification that needs
     // to be made here is to make the lcoeff_y=0 monic
+    #[inline(never)]
     fn bivariate_hensel_lift_bernardin(
         &self,
         interpolation_var: usize,
@@ -5665,7 +5665,92 @@ where
             .collect()
     }
 
+    /// Recombine complete monic Frobenius orbits and descend their products.
+    /// Return the combined scalar unit separately, as in `factor`.
+    fn try_recombine_galois_factors(
+        &self,
+        factors: Vec<MultivariatePolynomial<AlgebraicExtension<F::Base>, E, LexOrder>>,
+    ) -> Option<Vec<Self>> {
+        let field = factors.first()?.ring().clone();
+        let q = self.ring().size()?;
+        let mut unit = factors[0].one();
+        let mut pending = Vec::with_capacity(factors.len());
+        for factor in factors {
+            if factor.is_zero() || factor.ring() != &field {
+                return None;
+            }
+            unit = unit.mul_coeff(factor.lcoeff());
+            if !factor.is_constant() {
+                pending.push(Some(factor.make_monic()));
+            }
+        }
+
+        let mut grouped = Vec::new();
+        for index in 0..pending.len() {
+            let Some(first) = pending[index].take() else {
+                continue;
+            };
+            let mut product = first.clone();
+            let mut conjugate = first.clone();
+            loop {
+                conjugate = conjugate.map_coeff(
+                    |coefficient| {
+                        // Binary powering also supports field sizes larger than u64.
+                        let mut exponent = q.clone();
+                        let mut value = conjugate.constant(coefficient.clone());
+                        let mut result = value.one();
+                        while !exponent.is_zero() {
+                            if (&exponent % &Integer::from(2)).is_one() {
+                                result = result * &value;
+                            }
+                            exponent /= 2;
+                            if !exponent.is_zero() {
+                                value = &value * &value;
+                            }
+                        }
+                        result.get_constant()
+                    },
+                    field.clone(),
+                );
+                if conjugate == first {
+                    break;
+                }
+                let matching = pending
+                    .iter_mut()
+                    .find(|factor| factor.as_ref().is_some_and(|factor| factor == &conjugate))?;
+                product = product * &matching.take()?;
+            }
+            grouped.push(product);
+        }
+
+        if !unit.is_one() || grouped.is_empty() {
+            grouped.push(unit);
+        }
+        let descended: Vec<_> = grouped
+            .into_iter()
+            .map(|factor| {
+                let variables = factor.variables().clone();
+                let coefficients = factor
+                    .coefficients
+                    .iter()
+                    .map(|coefficient| self.ring().try_downgrade_element(coefficient))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Self::from_parts(
+                    coefficients,
+                    factor.exponents,
+                    self.ring().clone(),
+                    variables,
+                ))
+            })
+            .collect::<Option<_>>()?;
+        let product = descended
+            .iter()
+            .fold(self.one(), |product, factor| product * factor);
+        (product == *self).then_some(descended)
+    }
+
     /// Compute the bivariate factorization of a square-free polynomial.
+    #[inline(never)]
     fn bivariate_factorization(&self, main_var: usize, interpolation_var: usize) -> Vec<Self> {
         assert!(main_var != interpolation_var);
 
@@ -5692,7 +5777,12 @@ where
         let mut i = 0;
         let mut rng = rng();
         loop {
-            i += 1;
+            if self.degree(main_var) == uni_f.degree(main_var)
+                && uni_f.gcd(&uni_f.derivative(main_var)).is_constant()
+            {
+                break;
+            }
+
             if self.ring().size() == Some(i.into()) {
                 let field = self
                     .ring()
@@ -5707,20 +5797,20 @@ where
 
                 let facs = s_l.bivariate_factorization(main_var, interpolation_var);
 
-                return facs
-                    .into_iter()
-                    .map(|f| f.map_coeff(|c| self.ring().downgrade_element(c), self.ring().clone()))
-                    .collect();
+                return self
+                    .try_recombine_galois_factors(facs)
+                    .expect("Galois factors do not descend to the original field");
             }
 
-            if self.degree(main_var) == uni_f.degree(main_var)
-                && uni_f.gcd(&uni_f.derivative(main_var)).is_constant()
-            {
-                break;
-            }
-
-            sample_point = self.ring().sample(&mut rng, &(0..=i));
+            // After zero, try a small constant before sampling the whole field.
+            let policy = if i == 0 {
+                self.ring().sampling_policy(Some(0), (0..=1).into())
+            } else {
+                self.ring().uniform_sampling_policy()
+            };
+            sample_point = self.ring().sample(&mut rng, &policy);
             uni_f = self.replace(interpolation_var, &sample_point);
+            i += 1;
         }
 
         let mut d = self.degree(interpolation_var).to_u32();
@@ -5849,6 +5939,7 @@ where
 
     /// Precompute the leading coefficients of the polynomial factors, using an
     /// adapted version of Kaltofen's algorithm that has modifications of Martin Lee and Stanislav Poslavsky.
+    #[inline(never)]
     fn lcoeff_precomputation(
         &self,
         bivariate_factors: &[Self],
@@ -5906,7 +5997,9 @@ where
                     poly_eval = poly_eval.replace(*v, p);
                 }
             }
-            let sqf = poly_eval.square_free_factorization();
+            let mut sqf = poly_eval.square_free_factorization();
+            // Scalar units do not affect whether the nonconstant image is square-free.
+            sqf.retain(|(factor, _)| !factor.is_constant());
             if sqf.len() != 1 || sqf[0].1 != 1 {
                 debug!("Polynomial is not square free: {}", poly_eval);
                 return Err(main_bivariate_factors.len());
@@ -5930,8 +6023,13 @@ where
                     return Err(main_bivariate_factors.len());
                 }
 
-                let bivariate_factors: Vec<_> =
-                    poly_eval.factor().into_iter().map(|(f, _)| f).collect();
+                let bivariate_factors: Vec<_> = poly_eval
+                    .factor()
+                    .into_iter()
+                    .map(|(f, _)| f)
+                    // Scalar units do not count as bivariate polynomial factors.
+                    .filter(|f| !f.is_constant())
+                    .collect();
 
                 if bivariate_factors.len() != main_bivariate_factors.len() {
                     return Err(bivariate_factors.len().min(main_bivariate_factors.len()));
@@ -6176,16 +6274,21 @@ where
                     max_bivariate_factors,
                 );
 
-                return facs
-                    .into_iter()
-                    .map(|f| f.map_coeff(|c| self.ring().downgrade_element(c), self.ring().clone()))
-                    .collect();
+                return self
+                    .try_recombine_galois_factors(facs)
+                    .expect("Galois factors do not descend to the original field");
             }
 
+            // Constants are cheap, but retries must also reach points outside
+            // the prime subfield, including after a field upgrade.
+            let policy = if sample_fail.is_one() {
+                self.ring()
+                    .sampling_policy(Some(0), (0..=coefficient_upper_bound).into())
+            } else {
+                self.ring().uniform_sampling_policy()
+            };
             for s in &mut sample_points {
-                s.1 = self
-                    .ring()
-                    .nth(rng.random_range(0..=coefficient_upper_bound).into());
+                s.1 = self.ring().sample(&mut rng, &policy);
             }
 
             biv_f = self.clone();
@@ -6248,7 +6351,11 @@ where
             debug!("Sample point {}={}", v, self.ring().printer(s));
         }
 
-        let bivariate_factors = biv_f.bivariate_factorization(order[0], order[1]);
+        let bivariate_factors: Vec<_> = biv_f
+            .bivariate_factorization(order[0], order[1])
+            .into_iter()
+            .filter(|factor| !factor.is_constant())
+            .collect();
 
         if bivariate_factors.len() == 1 {
             // the polynomial is irreducible
@@ -6340,9 +6447,8 @@ where
     }
 }
 
-impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: PositiveExponent>
-    MultivariatePolynomial<F, E, LexOrder>
-{
+impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
+    #[inline(never)]
     fn multivariate_diophantine(
         univariate_deltas: &[Self],
         univariate_factors: &mut [Self],
@@ -6472,7 +6578,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         skeletons: &[Self],
         order: &[usize],
         context: &mut SparseDiophantineContext<Self, F::Element>,
-    ) -> Option<Vec<Self>> {
+    ) -> Option<Vec<Self>>
+    where
+        F: UniformlySampleableRing,
+    {
         if prods.len() != skeletons.len() {
             return None;
         }
@@ -7098,7 +7207,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         skeletons: &[Self],
         order: &[usize],
         context: &mut SparseDiophantineContext<Self, F::Element>,
-    ) -> Option<Vec<Self>> {
+    ) -> Option<Vec<Self>>
+    where
+        F: UniformlySampleableRing,
+    {
         if factors.len() != 2 || prods.len() != 2 || skeletons.len() != 2 || order.len() < 2 {
             return None;
         }
@@ -7271,13 +7383,17 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         None
     }
 
+    #[inline(never)]
     fn sparse_multivariate_diophantine_by_sampling(
         factors: &[Self],
         prods: &[Self],
         error: &Self,
         skeletons: &[Self],
         order: &[usize],
-    ) -> Option<Vec<Self>> {
+    ) -> Option<Vec<Self>>
+    where
+        F: UniformlySampleableRing,
+    {
         if factors.len() != skeletons.len() || factors.len() != prods.len() || order.len() < 2 {
             return None;
         }
@@ -7435,23 +7551,13 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         poly: &Self,
         sample_vars: &[usize],
         rng: &mut impl rand::RngCore,
-    ) -> Vec<(usize, F::Element)> {
-        let upper = match poly.ring().characteristic().to_i64() {
-            Some(characteristic) if characteristic > 0 => characteristic - 1,
-            _ => MAX_RNG_PREFACTOR as i64 - 1,
-        };
-        let policy = 0..=upper;
+    ) -> Vec<(usize, F::Element)>
+    where
+        F: UniformlySampleableRing,
+    {
         sample_vars
             .iter()
-            .map(|v| {
-                let mut value = poly.ring().sample(rng, &policy);
-                let mut attempts = 0;
-                while poly.ring().is_zero(&value) && attempts < 8 {
-                    value = poly.ring().sample(rng, &policy);
-                    attempts += 1;
-                }
-                (*v, value)
-            })
+            .map(|v| (*v, poly.ring().sample_uniform_nonzero(rng)))
             .collect()
     }
 
@@ -7624,7 +7730,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         order: &[usize],
         last_degree: usize,
         verify_product: bool,
-    ) -> Option<Vec<Self>> {
+    ) -> Option<Vec<Self>>
+    where
+        F: UniformlySampleableRing,
+    {
         if factors.len() != 2 || order.len() <= 2 {
             return None;
         }
@@ -8024,7 +8133,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         true_lcoeffs: Option<&[Self]>,
         order: &[usize],
         context: MultivariateHenselContext,
-    ) -> Result<Vec<Self>, MultivariateHenselError> {
+    ) -> Result<Vec<Self>, MultivariateHenselError>
+    where
+        F: UniformlySampleableRing,
+    {
         debug!("Hensel lift {} with order {:?}", self, order);
 
         let mut degrees: Vec<_> = order
@@ -8132,6 +8244,7 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         Ok(reconstructed_factors)
     }
 
+    #[inline(never)]
     fn multivariate_hensel_step(
         &self,
         univariate_deltas: &[Self],
@@ -8142,7 +8255,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         degrees: &mut [usize],
         context: MultivariateHenselContext,
         used_evaluated_lift: &mut bool,
-    ) -> Result<Vec<Self>, MultivariateHenselError> {
+    ) -> Result<Vec<Self>, MultivariateHenselError>
+    where
+        F: UniformlySampleableRing,
+    {
         let last_var = *order.last().unwrap();
         let last_degree = *degrees.last().unwrap();
 
@@ -8370,6 +8486,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         self.hensel_lift_with_strategy(u, w, gamma, max_p, true)
     }
 
+    #[inline(never)]
     fn hensel_lift_with_strategy<UField: FiniteFieldWorkspace>(
         &self,
         mut u: MultivariatePolynomial<FiniteField<UField>, E, LexOrder>,
@@ -10144,6 +10261,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     /// to `mod y^iterations mod p^k`.
     ///
     /// Univariate factors must be monic and `lcoeff_y=0` should be as well.
+    #[inline(never)]
     fn bivariate_hensel_lift_bernardin(
         poly: &MultivariatePolynomial<FiniteField<Integer>, E, LexOrder>,
         interpolation_var: usize,
@@ -10803,6 +10921,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     // TODO: merge with the implementation for finite fields as the implementation
     // is almost identical
     #[allow(dead_code)]
+    #[inline(never)]
     fn lcoeff_precomputation(
         &self,
         bivariate_factors: &[Self],
@@ -11815,6 +11934,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     /// and accepting only an exact reconstruction of the input. Failed samples
     /// advance the deterministic coefficient bound and retry without growing
     /// the call stack.
+    #[inline(never)]
     fn multivariate_factorization_bivariate_start(
         &self,
         order: &mut [usize],
@@ -12533,7 +12653,7 @@ mod test {
         GLOBAL_SETTINGS,
         atom::AtomCore,
         domains::{
-            InternalOrdering, Ring, RingOps,
+            Field, InternalOrdering, Ring, RingOps,
             algebraic::AlgebraicExtension,
             finite_field::{
                 FiniteField, FiniteFieldCore, FiniteFieldElement, PrimeIteratorU64, ToFiniteField,
@@ -16994,6 +17114,219 @@ mod test {
         let mut r = poly.factor();
         r.sort_by(|a, b| a.0.internal_cmp(&b.0).then(a.1.cmp(&b.1)));
         assert_eq!(r, res);
+    }
+
+    #[test]
+    fn galois_lcoeff_precomputation_accepts_scalar_units() {
+        // This GF(32) sample previously rejected a valid square-free image.
+        let field =
+            AlgebraicExtension::galois_field(Z2, 5, crate::poly::PolyVariable::Temporary(0));
+        assert_eq!(field.poly().exponents, [0, 2, 5]);
+        let alpha = field.generator();
+        let sample_y = field.add(
+            &field.one(),
+            &field.add(&field.pow(&alpha, 2), &field.pow(&alpha, 4)),
+        );
+        let sample_z = field.add(&alpha, &field.pow(&alpha, 3));
+        let variables = Some(Arc::new(
+            ["x", "y", "z"].map(|name| symbol!(name).into()).to_vec(),
+        ));
+        let factors = [
+            parse!("x*(y^2+y)*(z^2+z)+1").to_polynomial::<_, u16>(&field, variables.clone()),
+            parse!("x+y+z").to_polynomial::<_, u16>(&field, variables),
+        ];
+        let product = &factors[0] * &factors[1];
+        let order = [0, 1, 2];
+        let samples = vec![(1, sample_y), (2, sample_z.clone())];
+        let bivariate_factors = factors
+            .iter()
+            .map(|factor| factor.replace(2, &sample_z))
+            .collect::<Vec<_>>();
+        let (sorted, leading) = product
+            .lcoeff_precomputation(&bivariate_factors, &samples, &order)
+            .unwrap();
+        assert_eq!(
+            leading
+                .iter()
+                .fold(product.one(), |value, factor| &value * factor),
+            product.univariate_lcoeff(0)
+        );
+        let sorted = product.impose_true_lcoeffs_on_factors(&sorted, &leading, &samples, &order, 2);
+        let (mut univariate, delta) =
+            MultivariatePolynomial::univariate_diophantine_field(&sorted, &order, &samples);
+        let reconstructed = product
+            .multivariate_hensel_lifting(
+                &sorted,
+                &mut univariate,
+                &delta,
+                &samples,
+                Some(&leading),
+                &order,
+                super::MultivariateHenselContext::new(2),
+            )
+            .unwrap();
+        assert_eq!(reconstructed.len(), 2);
+        assert_eq!(&reconstructed[0] * &reconstructed[1], product);
+    }
+
+    #[test]
+    fn galois_conjugate_descent_preserves_orbits_units_and_multiplicities() {
+        let base = Zp::new(5);
+        let field = AlgebraicExtension::galois_field(
+            base.clone(),
+            2,
+            crate::poly::PolyVariable::Temporary(0),
+        );
+        let alpha = field.generator();
+        let conjugate = field.pow(&alpha, 5);
+        let x = parse!("x").to_polynomial::<_, u16>(&field, None);
+        let first_orbit = [
+            &x - &x.constant(alpha.clone()),
+            &x - &x.constant(conjugate.clone()),
+        ];
+        let second_orbit = [
+            &x - &x.constant(field.add(&alpha, &field.one())),
+            &x - &x.constant(field.add(&conjugate, &field.one())),
+        ];
+        let expected_orbits = [&first_orbit, &second_orbit].map(|orbit| {
+            let product = &orbit[0] * &orbit[1];
+            product.map_coeff(
+                |coefficient| coefficient.poly().get_constant(),
+                base.clone(),
+            )
+        });
+        let mut expected = vec![
+            expected_orbits[0].clone(),
+            expected_orbits[0].clone(),
+            expected_orbits[1].clone(),
+        ];
+        let scalar = base.nth(2.into());
+        let product = expected
+            .iter()
+            .fold(expected[0].one(), |product, factor| product * factor)
+            .mul_coeff(scalar);
+        expected.push(product.constant(scalar));
+        let mut upgraded = vec![
+            first_orbit[0].clone(),
+            first_orbit[0].clone(),
+            second_orbit[0].clone(),
+            first_orbit[1].clone(),
+            first_orbit[1].clone(),
+            second_orbit[1].clone(),
+        ];
+        // Extension scalars cancel globally; the repeated orbit must retain multiplicity two.
+        upgraded[0] = upgraded[0].clone().mul_coeff(alpha.clone());
+        let last = upgraded.last_mut().unwrap();
+        *last = last
+            .clone()
+            .mul_coeff(field.mul(&field.inv(&alpha), &field.constant(scalar)));
+        let actual = product.try_recombine_galois_factors(upgraded).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual
+                .iter()
+                .fold(product.one(), |product, factor| product * factor),
+            product
+        );
+    }
+
+    #[test]
+    fn galois_conjugate_descent_rejects_incomplete_or_inconsistent_orbits() {
+        let base = Zp::new(5);
+        let field = AlgebraicExtension::galois_field(
+            base.clone(),
+            2,
+            crate::poly::PolyVariable::Temporary(0),
+        );
+        let alpha = field.generator();
+        let x = parse!("x").to_polynomial::<_, u16>(&field, None);
+        let factors = vec![
+            &x - &x.constant(alpha.clone()),
+            &x - &x.constant(field.pow(&alpha, 5)),
+        ];
+        let product = (&factors[0] * &factors[1]).map_coeff(
+            |coefficient| coefficient.poly().get_constant(),
+            base.clone(),
+        );
+        assert!(
+            product
+                .try_recombine_galois_factors(vec![factors[0].clone()])
+                .is_none()
+        );
+        assert!(
+            product
+                .mul_coeff(base.nth(2.into()))
+                .try_recombine_galois_factors(factors)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn galois_factorization_recombines_extension_conjugates() {
+        let field = Zp::new(5);
+        let variables = Some(Arc::new(
+            ["x", "y"].map(|name| symbol!(name).into()).to_vec(),
+        ));
+        // Every base-field y sample repeats x+y, forcing a field upgrade.
+        // The two extension-field factors are conjugate over GF(5), where 2
+        // is not a square, so their product must remain one irreducible factor.
+        let polynomial = parse!("(x+y)^2-2*(y^5-y)^2")
+            .expand()
+            .to_polynomial::<_, u16>(&field, variables);
+        assert_eq!(polynomial.factor(), vec![(polynomial.clone(), 1)]);
+        let scaled = polynomial.clone().mul_coeff(field.nth(2.into()));
+        assert_eq!(
+            scaled.factor(),
+            vec![(polynomial, 1), (scaled.constant(field.nth(2.into())), 1)]
+        );
+    }
+
+    #[test]
+    fn galois_multivariate_sampling_escapes_the_prime_subfield() {
+        let field =
+            AlgebraicExtension::galois_field(Z2, 4, crate::poly::PolyVariable::Temporary(0));
+        let mut factors = [
+            parse!("x*(y^2+y)*(z^2+z)+1").to_polynomial::<_, u16>(&field, None),
+            parse!("x+y+z").to_polynomial::<_, u16>(&field, None),
+        ];
+        super::MultivariatePolynomial::unify_variables_list(&mut factors);
+        let product = &factors[0] * &factors[1];
+        let mut order = ["x", "y", "z"].map(|name| {
+            product
+                .variables()
+                .iter()
+                .position(|v| v == &symbol!(name))
+                .unwrap()
+        });
+
+        // Every prime-subfield evaluation of y or z destroys the x degree.
+        // Start with the multivariate path directly to exercise its retries.
+        let actual = product.multivariate_factorization(&mut order, 10, None);
+        assert_eq!(actual.len(), 2);
+        assert_eq!(&actual[0] * &actual[1], product);
+
+        // Starting in GF(2) also requires upgrading before any sample can work.
+        let prime_product = product.map_coeff(|c| c.poly().get_constant(), Z2);
+        let actual = prime_product.multivariate_factorization(&mut order, 10, None);
+        assert_eq!(actual.len(), 2);
+        assert_eq!(&actual[0] * &actual[1], prime_product);
+    }
+
+    #[test]
+    fn galois_bivariate_sampling_escapes_the_prime_subfield() {
+        let field =
+            AlgebraicExtension::galois_field(Z2, 4, crate::poly::PolyVariable::Temporary(0));
+        let product = parse!("(x*(y^2+y)+1)*(x+y)").to_polynomial::<_, u16>(&field, None);
+        let [x, y] = ["x", "y"].map(|name| {
+            product
+                .variables()
+                .iter()
+                .position(|v| v == &symbol!(name))
+                .unwrap()
+        });
+        let actual = product.bivariate_factorization(x, y);
+        assert_eq!(actual.len(), 2);
+        assert_eq!(&actual[0] * &actual[1], product);
     }
 
     #[test]

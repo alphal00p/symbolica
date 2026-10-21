@@ -886,10 +886,8 @@ impl<T: serde::Serialize> serde::Serialize for JITCompiledEvaluator<T> {
 }
 
 #[cfg(feature = "serde")]
-impl<
-    'de,
-    T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy + serde::Deserialize<'de>,
-> serde::Deserialize<'de> for JITCompiledEvaluator<T>
+impl<'de, T: JITCompiledNumber + EvaluationDomain + Clone + serde::Deserialize<'de>>
+    serde::Deserialize<'de> for JITCompiledEvaluator<T>
 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let (fs, compressed_ir, settings): (
@@ -2376,12 +2374,6 @@ impl CompiledNumber for Complex<wide::f64x4> {
         function_name: &str,
         settings: ExportSettings,
     ) -> Result<String, String> {
-        if !eval.stack.iter().all(|x| x.is_real()) {
-            return Err(
-                "Cannot create real evaluator with complex coefficients. Use Complex<f64>".into(),
-            );
-        }
-
         Ok(match settings.inline_asm {
             // assume AVX2 for X64
             InlineASM::X64 => eval.export_simd_str(function_name, settings, true, InlineASM::AVX2),
