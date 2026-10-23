@@ -13,6 +13,7 @@ pub use harmonic_polylog::{
     hpl_at_sixth_root, sixth_root_hpl,
 };
 pub use projections::{imaginary_part, real_part};
+pub use tracked::clausen_tracked;
 
 use crate::{
     atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
