@@ -24,6 +24,7 @@ pub(crate) trait MultiPrecisionFloatRounding {
     fn sub_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
     fn mul_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
     fn div_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
+    fn log_round(&self, prec: u32, direction: RoundingDirection) -> Self;
 }
 
 /// Integer operations shared by independently selected integer and float backends.
@@ -73,6 +74,10 @@ impl MultiPrecisionFloatRounding for MultiPrecisionFloat {
 
     fn div_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
         Self::with_val_round(prec, self / rhs, rug_rounding_direction(direction)).0
+    }
+
+    fn log_round(&self, prec: u32, direction: RoundingDirection) -> Self {
+        Self::with_val_round(prec, self.ln_ref(), rug_rounding_direction(direction)).0
     }
 }
 
@@ -431,6 +436,16 @@ mod astro {
                 value: self
                     .value
                     .div(&rhs.value, precision(prec), rounding_mode(direction)),
+                prec,
+            }
+        }
+
+        fn log_round(&self, prec: u32, direction: RoundingDirection) -> Self {
+            MultiPrecisionFloat {
+                value: with_constants(|constants| {
+                    self.value
+                        .ln(precision(prec), rounding_mode(direction), constants)
+                }),
                 prec,
             }
         }

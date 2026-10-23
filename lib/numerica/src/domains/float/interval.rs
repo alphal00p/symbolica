@@ -14,8 +14,9 @@ use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 ///
 /// The ball represents all numbers in `[center - radius, center + radius]`.
 /// Addition, subtraction, multiplication, division, inversion, and the square
-/// root of finite nonnegative balls use directed rounding and return certified
-/// enclosures. Other operations are not currently certifying.
+/// root of finite nonnegative balls and the logarithm of finite positive balls
+/// use directed rounding and return certified enclosures. Other transcendental
+/// operations are not currently certifying.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -675,10 +676,23 @@ impl Real for RealBall {
     }
 
     fn log(&self) -> Self {
-        if self.lower_bound() <= self.center.zero() {
-            return Self::invalid(self.get_precision());
+        let prec = self.get_precision();
+        let lower = self.lower_bound();
+        let upper = self.upper_bound();
+        if !lower.is_finite()
+            || !upper.is_finite()
+            || self.radius < self.radius.zero()
+            || lower <= self.center.zero()
+        {
+            return Self::invalid(prec);
         }
-        self.monotone_increasing(Float::log)
+        let lower = lower.log_round(prec, RoundingDirection::Down);
+        let upper = upper.log_round(prec, RoundingDirection::Up);
+        if lower.is_finite() && upper.is_finite() {
+            Self::from_outward_bounds(lower, upper, prec)
+        } else {
+            Self::invalid(prec)
+        }
     }
 
     fn exp(&self) -> Self {
@@ -1045,6 +1059,82 @@ mod tests {
         assert!(left.re.is_strictly_positive());
         assert!(!left.re.is_strictly_negative());
         assert!(left.is_disjoint(&right));
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use crate::domains::{
+        float::{Float, Real, RealBall, SingleFloat},
+        rational::Rational,
+    };
+
+    // log(2) = 2 sum_{k>=0} (1/3)^(2k+1)/(2k+1). The positive omitted
+    // tail is at most 2 z^(2N+1)/((2N+1)(1-z^2)), independently of any
+    // floating logarithm implementation or rounding mode.
+    fn log_two_bounds(terms: usize) -> (Rational, Rational) {
+        let z = Rational::from((1, 3));
+        let square = &z * &z;
+        let mut power = z;
+        let mut sum = Rational::zero();
+        for k in 0..terms {
+            sum += &power / &Rational::from((2 * k + 1) as i64);
+            power *= &square;
+        }
+        let lower = sum * Rational::from(2);
+        let tail = power * Rational::from(2)
+            / (Rational::from((2 * terms + 1) as i64) * (Rational::one() - square));
+        (lower.clone(), lower + tail)
+    }
+
+    #[test]
+    fn logarithm_encloses_exact_series_at_arbitrary_precisions() {
+        for bits in [8, 53, 113, 173, 256, 512, 1024] {
+            let (lower, upper) = log_two_bounds(bits as usize / 3 + 20);
+            for (input, expected_lower, expected_upper) in [
+                (Rational::from(2), lower.clone(), upper.clone()),
+                (Rational::from((1, 2)), -upper.clone(), -lower.clone()),
+                (
+                    Rational::from(4),
+                    &lower * &Rational::from(2),
+                    &upper * &Rational::from(2),
+                ),
+            ] {
+                let result = RealBall::from_rational_bounds(&input, &input, bits).log();
+                assert!(result.is_finite());
+                assert!(
+                    !result.radius.is_zero(),
+                    "irrational logarithm reported exact"
+                );
+                assert!(result.lower_bound().to_rational() <= expected_lower);
+                assert!(result.upper_bound().to_rational() >= expected_upper);
+            }
+            let interval =
+                RealBall::from_rational_bounds(&Rational::from((1, 2)), &2.into(), bits).log();
+            assert!(interval.lower_bound().to_rational() <= -upper.clone());
+            assert!(interval.upper_bound().to_rational() >= upper);
+            assert!(RealBall::exact(Float::with_val(bits, 1)).log().is_zero());
+        }
+    }
+
+    #[test]
+    fn logarithm_rejects_nonpositive_nonfinite_and_malformed_balls() {
+        for (center, radius) in [
+            (0.0, 0.0),
+            (-1.0, 0.0),
+            (1.0, 1.0),
+            (f64::INFINITY, 0.0),
+            (f64::NAN, 0.0),
+            (1.0, f64::INFINITY),
+            (1.0, f64::NAN),
+            (1.0, -0.25),
+        ] {
+            let ball = RealBall {
+                center: Float::with_val(113, center),
+                radius: Float::with_val(113, radius),
+            };
+            assert!(!ball.log().is_finite());
+        }
     }
 }
 

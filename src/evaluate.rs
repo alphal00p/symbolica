@@ -36,6 +36,7 @@ mod external;
 mod function_map;
 mod instruction;
 mod optimize;
+mod tracked;
 mod tree;
 
 #[cfg(feature = "native_code_generation")]
@@ -53,6 +54,7 @@ pub use instruction::{
     Instruction, InstructionList, Label, Slot, VectorInstruction,
 };
 pub use optimize::*;
+pub use tracked::evaluate_tracked;
 pub use tree::*;
 
 use function_map::Expr;
@@ -72,8 +74,7 @@ use crate::{
         integer::Integer,
         rational::Rational,
     },
-    error, get_symbol,
-    info,
+    error, get_symbol, info,
     license::LicenseManager,
     numerical_integration::MonteCarloRng,
     utils::AbortCheck,
