@@ -18,6 +18,9 @@ use crate::{
     },
 };
 
+mod clausen;
+pub use clausen::clausen_tracked;
+
 #[derive(Clone, Copy)]
 enum Unary {
     Exp,
@@ -470,6 +473,40 @@ fn polygamma_tracked(
     Err("tracked polygamma expansion exhausted its fixed-precision remainder budget".into())
 }
 
+/// Keep the integer order exact even when it needs more bits than the
+/// requested floating carrier. Shared by zeta and the Jonquiere expansions.
+fn zeta_integer_bound(order: u32, bits: u32) -> Result<RealBall, String> {
+    #[cfg(feature = "float-mpfr")]
+    {
+        use crate::domains::backend::float::MultiPrecisionFloat;
+        use rug::float::Round;
+        let lower: Float = MultiPrecisionFloat::with_val_round(
+            bits,
+            MultiPrecisionFloat::zeta_u(order),
+            Round::Down,
+        )
+        .0
+        .into();
+        let upper: Float = MultiPrecisionFloat::with_val_round(
+            bits,
+            MultiPrecisionFloat::zeta_u(order),
+            Round::Up,
+        )
+        .0
+        .into();
+        if !lower.is_finite() || !upper.is_finite() {
+            Err("zeta argument is its pole at one".into())
+        } else {
+            Ok(RealBall::from_bounds(lower, upper))
+        }
+    }
+    #[cfg(not(feature = "float-mpfr"))]
+    {
+        let _ = (order, bits);
+        Err("tracked integer zeta bounds require the float-mpfr backend".into())
+    }
+}
+
 fn zeta_tracked(arg: &TrackedComplex, bits: u32) -> Result<TrackedComplex, String> {
     if is_real(&arg.ball) {
         if arg.ball.re.radius.is_fully_zero() {
@@ -488,26 +525,7 @@ fn zeta_tracked(arg: &TrackedComplex, bits: u32) -> Result<TrackedComplex, Strin
                 })
                 .and_then(|n| u32::try_from(n).ok())
             {
-                use crate::domains::backend::float::MultiPrecisionFloat;
-                use rug::float::Round;
-                let lower: Float = MultiPrecisionFloat::with_val_round(
-                    bits,
-                    MultiPrecisionFloat::zeta_u(order),
-                    Round::Down,
-                )
-                .0
-                .into();
-                let upper: Float = MultiPrecisionFloat::with_val_round(
-                    bits,
-                    MultiPrecisionFloat::zeta_u(order),
-                    Round::Up,
-                )
-                .0
-                .into();
-                if !lower.is_finite() || !upper.is_finite() {
-                    return Err("zeta argument is its pole at one".into());
-                }
-                return Ok(real(RealBall::from_bounds(lower, upper), arg.error_quality));
+                return Ok(real(zeta_integer_bound(order, bits)?, arg.error_quality));
             }
             return Ok(real(
                 directed_unary(Unary::Zeta, &arg.ball.re.center, bits)?,
