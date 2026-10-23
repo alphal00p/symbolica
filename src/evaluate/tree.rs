@@ -40,7 +40,7 @@ fn latched_horner_settings(
 /// a factorization that no improving single transposition reaches.
 fn mutate_horner_order<T>(order: &mut [T], rng: &mut impl Rng, mutation: usize) {
     let size = order.len();
-    if mutation % 4 == 0 {
+    if mutation.is_multiple_of(4) {
         let first = rng.random_range(0..size - 1);
         order.swap(first, first + 1);
         return;
@@ -864,17 +864,17 @@ impl<'a, 's> HornerRegions<'a, 's> {
                 self.settings,
                 |order| {
                     let candidate = prepared.as_view().horner_scheme_local(Some(order), true);
-                    if self.settings.horner_use_cpe {
-                        if let Ok(evaluator) = AtomView::linearize_multiple(
+                    if self.settings.horner_use_cpe
+                        && let Ok(evaluator) = AtomView::linearize_multiple(
                             &[candidate.as_view()],
                             &FunctionMap::new(),
                             &score_params,
                             self.settings.clone(),
-                        ) {
-                            return evaluator_horner_cost(
-                                &AtomView::optimize_evaluator_instructions(evaluator),
-                            );
-                        }
+                        )
+                    {
+                        return evaluator_horner_cost(&AtomView::optimize_evaluator_instructions(
+                            evaluator,
+                        ));
                     }
                     // Construction errors belong to the final evaluator build,
                     // including errors in branches which may be eliminated.
@@ -2865,7 +2865,7 @@ impl EvalTree<Complex<Rational>> {
         &mut self,
         settings: &OptimizationSettings,
     ) -> ExpressionEvaluator<Complex<Rational>> {
-        let mut evaluator = self.linearize_without_stack_optimization(&settings);
+        let mut evaluator = self.linearize_without_stack_optimization(settings);
         evaluator.optimize_stack();
 
         evaluator
