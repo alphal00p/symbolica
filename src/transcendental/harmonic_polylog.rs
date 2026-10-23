@@ -24,6 +24,8 @@ use super::SymbolCache;
 
 mod endpoint_one;
 pub use endpoint_one::{EndpointOneGplEvaluator, GplLetter, endpoint_one_gpl, gpl_at_one};
+mod real_argument;
+pub use real_argument::RealGplEvaluator;
 
 const MAX_WEIGHT: usize = 6;
 const MAX_WORDS: usize = 4096;
@@ -327,16 +329,16 @@ impl Fixed {
     }
 }
 
-struct Node {
-    pole: Pole,
+struct Node<P = Pole> {
+    pole: P,
     suffix: usize,
     weight: usize,
 }
 
-fn intern_poles(
-    word: &[Pole],
-    nodes: &mut Vec<Node>,
-    indices: &mut BTreeMap<Vec<Pole>, usize>,
+fn intern_poles<P: Clone + Ord>(
+    word: &[P],
+    nodes: &mut Vec<Node<P>>,
+    indices: &mut BTreeMap<Vec<P>, usize>,
 ) -> usize {
     if let Some(&index) = indices.get(word) {
         return index;
@@ -344,7 +346,7 @@ fn intern_poles(
     let suffix = intern_poles(&word[1..], nodes, indices);
     let index = nodes.len() + 1;
     nodes.push(Node {
-        pole: word[0],
+        pole: word[0].clone(),
         suffix,
         weight: word.len(),
     });
@@ -523,13 +525,56 @@ impl SixthRootHplEvaluator {
 }
 
 fn evaluate_gpl_nodes(nodes: &[Node], bits: u32) -> Result<Vec<ComplexBall>, String> {
-    let weight = nodes.iter().map(|n| n.weight).max().unwrap_or(1);
-    let mut n_terms = bits.max((4 * weight) as u32);
-    // |coefficient_n| <= (n+1)^(weight-1). For n >= 4*weight the
-    // successive majorant ratio is <3/4, giving a geometric tail bound.
-    while n_terms + 1 < bits + 2 + (weight as u32 - 1) * ceil_log2(n_terms + 2) {
-        n_terms += 1;
+    let (sums, n_terms) = evaluate_fixed_nodes(
+        nodes,
+        bits,
+        |pole| *pole == Pole::Zero,
+        |pole, value| pole.multiply_half_inverse(value),
+    )?;
+    let scale = Integer::one() << bits;
+    let rational = |value: Integer| Rational::from((value, scale.clone()));
+    let sqrt_integer = Integer::from((Integer::from(3) << (2 * bits)).to_multi_prec().root_ref(2));
+    let sqrt3 = RealBall::from_rational_bounds(
+        &rational(sqrt_integer.clone()),
+        &rational(sqrt_integer + 1),
+        bits,
+    );
+    Ok(sums
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let error = fixed_error(nodes, index, n_terms);
+            let radius = rational(Integer::from(error));
+            Complex::new(
+                RealBall::from_rational_ball(&rational(value.a), &radius, bits),
+                RealBall::from_rational_ball(&rational(value.b), &radius, bits) * &sqrt3,
+            )
+        })
+        .collect())
+}
+
+/// Shared suffix recurrence for geometrically convergent GPL series. Every
+/// nonzero kernel multiplier must have matrix row norm at most one, absolute
+/// complex magnitude at most one half, and less than one fixed-point unit of
+/// rounding error per component. These are also the hypotheses of the tail
+/// and fixed-point error bounds below.
+fn evaluate_fixed_nodes<P>(
+    nodes: &[Node<P>],
+    bits: u32,
+    is_zero: impl Fn(&P) -> bool,
+    multiply: impl Fn(&P, Fixed) -> Fixed,
+) -> Result<(Vec<Fixed>, u32), String> {
+    if nodes.is_empty() {
+        return Ok((
+            vec![Fixed {
+                a: Integer::one() << bits,
+                b: Integer::zero(),
+            }],
+            0,
+        ));
     }
+    let weight = nodes.iter().map(|n| n.weight).max().unwrap_or(1);
+    let n_terms = series_terms(weight, bits);
     if u64::from(n_terms) * nodes.len() as u64 > MAX_SERIES_WORK {
         return Err(
             "sixth-root HPL series work limit exceeded; split the batch or reduce precision".into(),
@@ -548,12 +593,10 @@ fn evaluate_gpl_nodes(nodes: &[Node], bits: u32) -> Result<Vec<ComplexBall>, Str
             // b_w(n) = [t^n] G(w;t) / 2^n. For a nonzero first pole a,
             // n*b_w(n) = (1/(2*a))*((n-1)*b_w(n-1)-b_suffix(n-1)).
             // A zero first pole instead divides b_suffix(n) by n.
-            current[index] = if node.pole == Pole::Zero {
+            current[index] = if is_zero(&node.pole) {
                 current[node.suffix].div(i64::from(n))
             } else {
-                states[index] = node
-                    .pole
-                    .multiply_half_inverse(states[index].sub(&previous[node.suffix]));
+                states[index] = multiply(&node.pole, states[index].sub(&previous[node.suffix]));
                 states[index].div(i64::from(n))
             };
             sums[index].add_assign(&current[index]);
@@ -561,34 +604,29 @@ fn evaluate_gpl_nodes(nodes: &[Node], bits: u32) -> Result<Vec<ComplexBall>, Str
         std::mem::swap(&mut previous, &mut current);
         current[0] = Fixed::default();
     }
-    let rational = |value: Integer| Rational::from((value, scale.clone()));
-    let sqrt_integer = Integer::from((Integer::from(3) << (2 * bits)).to_multi_prec().root_ref(2));
-    let sqrt3 = RealBall::from_rational_bounds(
-        &rational(sqrt_integer.clone()),
-        &rational(sqrt_integer + 1),
-        bits,
-    );
-    let gpls = sums
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| {
-            // If suffix coefficient error <=2*(d-1) ulps, the n*a_n state
-            // accumulates <=n*(2*d-1) ulps, and division by n adds <1.
-            // Thus each coefficient has <=2*d ulps error, and the sum <=2*d*N.
-            // The additional ulp encloses the exact analytic tail.
-            let error = if index == 0 {
-                0
-            } else {
-                2 * nodes[index - 1].weight as u64 * u64::from(n_terms) + 1
-            };
-            let radius = rational(Integer::from(error));
-            Complex::new(
-                RealBall::from_rational_ball(&rational(value.a), &radius, bits),
-                RealBall::from_rational_ball(&rational(value.b), &radius, bits) * &sqrt3,
-            )
-        })
-        .collect::<Vec<_>>();
-    Ok(gpls)
+    Ok((sums, n_terms))
+}
+
+fn series_terms(weight: usize, bits: u32) -> u32 {
+    let mut n_terms = bits.max((4 * weight) as u32);
+    // |coefficient_n| <= (n+1)^(weight-1). For n >= 4*weight the
+    // successive majorant ratio is <3/4, giving a geometric tail bound.
+    while n_terms + 1 < bits + 2 + (weight as u32 - 1) * ceil_log2(n_terms + 2) {
+        n_terms += 1;
+    }
+    n_terms
+}
+
+fn fixed_error<P>(nodes: &[Node<P>], index: usize, n_terms: u32) -> u64 {
+    // If suffix coefficient error <=2*(d-1) ulps, the n*a_n state
+    // accumulates <=n*(2*d-1) ulps, and division by n adds <1.
+    // Thus each coefficient has <=2*d ulps error, and the sum <=2*d*N.
+    // The additional ulp encloses the exact analytic tail.
+    if index == 0 {
+        0
+    } else {
+        2 * nodes[index - 1].weight as u64 * u64::from(n_terms) + 1
+    }
 }
 
 fn ceil_log2(value: u32) -> u32 {
