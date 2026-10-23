@@ -721,6 +721,13 @@ impl Float {
         self.0.div_round(&rhs.0, prec, direction).into()
     }
 
+    /// Evaluates the natural logarithm of the represented value with the
+    /// requested precision and rounding direction. For a finite positive input,
+    /// `Down` and `Up` bound the exact logarithm without first rounding the input.
+    pub fn log_round(&self, prec: u32, direction: RoundingDirection) -> Self {
+        self.0.log_round(prec, direction).into()
+    }
+
     /// Converts the exact rational `value` to `prec` binary digits, rounding
     /// in `direction`.
     ///
