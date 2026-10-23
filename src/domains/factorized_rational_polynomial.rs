@@ -1,5 +1,7 @@
 //! Rational polynomial field with factorized denominator.
 
+mod apart;
+
 use std::{
     borrow::Cow,
     cmp::Ordering,
